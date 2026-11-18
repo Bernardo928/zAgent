@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { claudeBin } from '../main/claudeBin';
+import { binAvailable, claudeBin, opencodeBin } from '../main/claudeBin';
 import { startMcpServer } from '../main/mcpServer';
 import { Orchestrator } from '../main/orchestrator';
 import { MAIN_ALLOWED_TOOLS, MAIN_PROMPT, mcpConfigJson } from '../shared/mainClaude';
@@ -173,14 +173,9 @@ function alive(pid: number): boolean {
   }
 }
 
-/** Acha um executável no PATH (no shell de login, como o usuário veria). */
+/** Acha um executável (PATH, pastas comuns de instalação e, por último, o shell de login). */
 function which(name: string): string | null {
-  if (process.platform === 'win32') {
-    const r = spawnSync('where', [name], { encoding: 'utf8' });
-    return r.status === 0 ? r.stdout.split(/\r?\n/)[0].trim() : null;
-  }
-  const r = spawnSync(process.env.SHELL || 'sh', ['-lc', `command -v ${name}`], { encoding: 'utf8' });
-  return r.status === 0 && r.stdout.trim() ? r.stdout.trim().split('\n').pop()!.trim() : null;
+  return binAvailable(name) ? (name === 'opencode' ? opencodeBin() : name === 'claude' ? claudeBin() : name) : null;
 }
 
 const AGENT_LABEL: Record<MainAgent, string> = { claude: 'Claude Code', opencode: 'OpenCode' };
@@ -315,7 +310,7 @@ function saveAgentChoice(agent: MainAgent): void {
 async function chooseAgent(p: Parsed): Promise<MainAgent | null> {
   if (p.agent) return p.agent;
   if (!process.stdout.isTTY || !process.stdin.isTTY) return p.savedAgent ?? 'claude';
-  const available = { claude: !!which('claude') || claudeBin() !== 'claude', opencode: !!which('opencode') };
+  const available = { claude: !!which('claude'), opencode: !!which('opencode') };
   const choice = await runIntro({ skipAnimation: p.noIntro, initial: p.savedAgent, available });
   if (choice) saveAgentChoice(choice);
   return choice;

@@ -105,6 +105,8 @@ export function runIntro(opts: IntroOptions): Promise<MainAgent | null> {
   const start = Date.now() - (opts.skipAnimation ? INTRO_MS + MOVE_MS : 0);
   let sel = Math.max(0, OPTIONS.findIndex((o) => o.id === opts.initial));
   let notice = '';
+  /** Opção que já mostrou o aviso de "não encontrado": um segundo Enter tenta abrir mesmo assim. */
+  let warned: MainAgent | null = null;
   let picking = !!opts.skipAnimation;
   let pickAt = picking ? start + INTRO_MS : 0;
   let timer: NodeJS.Timeout | undefined;
@@ -129,13 +131,16 @@ export function runIntro(opts: IntroOptions): Promise<MainAgent | null> {
         return;
       }
       notice = '';
+      if (key.name !== 'return' && key.name !== 'enter') warned = null;
       if (['left', 'up', 'h', 'k'].includes(key.name ?? '')) sel = (sel + OPTIONS.length - 1) % OPTIONS.length;
       else if (['right', 'down', 'l', 'j', 'tab'].includes(key.name ?? '')) sel = (sel + 1) % OPTIONS.length;
       else if (str === '1' || str === '2') sel = Number(str) - 1;
       if (key.name === 'return' || key.name === 'enter' || str === '1' || str === '2') {
         const o = OPTIONS[sel];
-        if (!opts.available[o.id]) {
-          notice = `${o.label} não está instalado. Instale com: ${o.install}`;
+        // A detecção pode errar (PATH diferente no proot, por exemplo): avisa, mas deixa tentar.
+        if (!opts.available[o.id] && warned !== o.id) {
+          warned = o.id;
+          notice = `Não achei o ${o.label}. Enter de novo para tentar mesmo assim, ou instale: ${o.install}`;
         } else return finish(o.id);
       }
       draw();
@@ -153,7 +158,7 @@ export function runIntro(opts: IntroOptions): Promise<MainAgent | null> {
 
       // O menu usa 9 linhas lado a lado ou 12 empilhado (tela estreita, como no celular).
       const stacked = W < 52;
-      const menuH = stacked ? 12 : 9;
+      const menuH = stacked ? 14 : 11;
       const intro: Layout = { cx: W / 2, cy: H / 2 - 1, R: Math.min(H * 0.36, (W / 2.1) * 0.4) };
       const topH = Math.max(3, H - menuH);
       const pick: Layout = { cx: W / 2, cy: topH / 2, R: Math.max(1.2, Math.min(topH * 0.4, (W / 2.1) * 0.4)) };
@@ -221,6 +226,19 @@ export function runIntro(opts: IntroOptions): Promise<MainAgent | null> {
   });
 }
 
+function wrapText(s: string, w: number): string[] {
+  const out: string[] = [];
+  let line = '';
+  for (const word of s.split(' ')) {
+    if (line && (line + ' ' + word).length > w) {
+      out.push(line);
+      line = word;
+    } else line = line ? line + ' ' + word : word;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
 const visLen = (s: string) => [...s.replace(/\x1b\[[0-9;]*m/g, '')].length;
 const center = (s: string, W: number) => {
   const pad = Math.max(0, Math.floor((W - visLen(s)) / 2));
@@ -245,10 +263,13 @@ function menuLines(W: number, stacked: boolean, sel: number, t: number, notice: 
     for (let r = 0; r < 3; r++) lines.push(center(boxes[0][r] + gap + boxes[1][r], W));
   }
   lines.push(center('', W));
-  if (notice) lines.push(center(fade(PURPLE) + notice, W));
+  if (notice) {
+    // Em tela estreita o aviso quebra em mais linhas em vez de estourar a largura.
+    for (const part of wrapText(notice, Math.max(10, W - 4)).slice(0, 3)) lines.push(center(fade(PURPLE) + part, W));
+  }
   else lines.push(center(fade([90, 100, 140]) + '←→ escolher · enter confirmar · q sair', W));
   // Completa a área do menu para o portal não vazar por baixo.
-  while (lines.length < (stacked ? 12 : 9)) lines.push(center('', W));
+  while (lines.length < (stacked ? 14 : 11)) lines.push(center('', W));
   return lines;
 }
 

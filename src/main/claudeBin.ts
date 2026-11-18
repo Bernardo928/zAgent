@@ -1,6 +1,8 @@
 // Descobre como executar o `claude` nesta máquina (Windows, macOS, Linux).
 import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { delimiter, join } from 'node:path';
 
 const cache = new Map<string, string>();
 
@@ -14,11 +16,50 @@ export function opencodeBin(): string {
   return resolveBin('opencode', process.env.ZAGENT_OPENCODE_BIN);
 }
 
+function isExecutable(p: string): boolean {
+  try {
+    if (!statSync(p).isFile()) return false;
+    if (process.platform !== 'win32') accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Procura direto nas pastas do PATH (e nas pastas comuns de instalação), sem depender de shell. */
+function searchPath(name: string): string | null {
+  const exts = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  const home = homedir();
+  const dirs = [
+    ...(process.env.PATH ?? '').split(delimiter),
+    join(home, '.local', 'bin'),
+    join(home, '.npm-global', 'bin'),
+    join(home, '.opencode', 'bin'),
+    join(home, '.claude', 'local'),
+    join(home, '.bun', 'bin'),
+    '/usr/local/bin',
+    '/usr/bin',
+    '/opt/homebrew/bin',
+  ].filter(Boolean);
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const p = join(dir, name + ext);
+      if (isExecutable(p)) return p;
+    }
+  }
+  return null;
+}
+
 /** Acha um executável no PATH do usuário; devolve o próprio nome se não achar. */
 export function resolveBin(name: string, override?: string): string {
   if (override) return override;
   const hit = cache.get(name);
   if (hit) return hit;
+  const direct = searchPath(name);
+  if (direct) {
+    cache.set(name, direct);
+    return direct;
+  }
   let found = name;
   try {
     if (process.platform === 'win32') {
@@ -29,7 +70,9 @@ export function resolveBin(name: string, override?: string): string {
       // Prefere o .exe nativo; o .cmd (instalação via npm) exige passar pelo cmd.exe.
       found = list.find((f) => f.toLowerCase().endsWith('.exe')) ?? list[0] ?? name;
     } else {
-      const shell = process.env.SHELL || '/bin/sh';
+      // Último recurso: shell de login (pega PATH definido só no .profile/.bashrc).
+      // No proot do Termux, SHELL pode apontar para um shell que não existe ali dentro.
+      const shell = process.env.SHELL && existsSync(process.env.SHELL) ? process.env.SHELL : '/bin/sh';
       // Shell de login para enxergar o PATH do usuário (apps GUI no macOS não herdam o PATH do terminal).
       found = execFileSync(shell, ['-lc', `command -v ${name}`], { encoding: 'utf8' }).trim().split('\n').pop() || name;
     }
@@ -41,8 +84,12 @@ export function resolveBin(name: string, override?: string): string {
 }
 
 export function claudeAvailable(): boolean {
-  const bin = claudeBin();
-  return bin !== 'claude' || existsSync(bin);
+  return claudeBin() !== 'claude';
+}
+
+/** true se o executável foi encontrado nesta máquina. */
+export function binAvailable(name: string): boolean {
+  return resolveBin(name) !== name;
 }
 
 const needsCmd = (bin: string) => process.platform === 'win32' && /\.(cmd|bat)$/i.test(bin);
