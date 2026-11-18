@@ -25,6 +25,10 @@
     "start": "npm run build && electron .",
     "dev": "node scripts/build.mjs --watch",
     "typecheck": "tsc -p .",
-    "test:e2e": "node test/e2e.mjs"
+    "test:e2e": "node test/e2e.mjs",
+    "cli": "node scripts/build.mjs && node dist/cli.js"
+  },
+  "bin": {
+    "zagent": "dist/cli.js"
   }
 }

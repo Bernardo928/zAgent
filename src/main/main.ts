@@ -8,13 +8,7 @@ import { claudeAvailable, claudeBin, ptyCommand } from './claudeBin';
 import { startMcpServer, type McpHandle } from './mcpServer';
 import { Orchestrator } from './orchestrator';
 import type { Settings } from '../shared/types';
-
-const MAIN_PROMPT = `Você está rodando dentro do zAgent, um app que mostra cada agente paralelo num painel ao lado deste terminal.
-Quando o usuário pedir para usar vários agentes, paralelizar, dividir o trabalho ou algo parecido:
-- Use as ferramentas do servidor MCP "zagent" (spawn_agents, wait_agents, agent_status, agent_log, message_agent, stop_agent), NÃO a ferramenta Task/Agent interna: os subagentes internos ficam invisíveis para o usuário.
-- Divida em tarefas independentes que não editem os mesmos arquivos. Cada agente roda num git worktree e numa branch próprios e não vê esta conversa, então escreva cada tarefa completa, com contexto e critério de pronto.
-- Depois de spawn_agents, chame wait_agents. Leia os resultados com olhar crítico: não confie em "pronto" sem verificação (testes rodaram? algo foi apagado?).
-- Para juntar o trabalho, mostre ao usuário as branches e os comandos de merge e PERGUNTE antes de fazer merge. Nunca rode git push --force.`;
+import { MAIN_PROMPT, MAIN_ALLOWED_TOOLS, mcpConfigJson } from '../shared/mainClaude';
 
 let win: BrowserWindow | null = null;
 let term: pty.IPty | null = null;
@@ -57,12 +51,7 @@ function startMainClaude(cols = 100, rows = 30): void {
   const runDir = join(app.getPath('userData'), 'run');
   mkdirSync(runDir, { recursive: true });
   const mcpConfig = join(runDir, 'mcp.json');
-  writeFileSync(
-    mcpConfig,
-    JSON.stringify({
-      mcpServers: { zagent: { type: 'http', url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } },
-    }),
-  );
+  writeFileSync(mcpConfig, mcpConfigJson(mcp.url, mcp.token));
   const promptFile = join(runDir, 'main-prompt.txt');
   writeFileSync(promptFile, MAIN_PROMPT);
 
@@ -70,7 +59,7 @@ function startMainClaude(cols = 100, rows = 30): void {
     '--mcp-config', mcpConfig,
     '--append-system-prompt-file', promptFile,
     // Ferramentas do próprio zAgent liberadas sem pedir permissão a cada uso.
-    '--allowedTools', 'mcp__zagent__spawn_agents,mcp__zagent__wait_agents,mcp__zagent__agent_status,mcp__zagent__agent_log,mcp__zagent__message_agent,mcp__zagent__stop_agent',
+    '--allowedTools', MAIN_ALLOWED_TOOLS,
   ];
   const cmd = process.env.ZAGENT_MAIN_CMD
     ? { file: process.env.ZAGENT_MAIN_CMD, args: [] as string[] }

@@ -15,6 +15,13 @@ onde dá para acompanhar tudo ao vivo: comandos, arquivos editados, erros, bloqu
 └──────────────────────────────┴──────────────────────────────┘
 ```
 
+## Duas versões
+
+- **Desktop** (Electron): `npm start`
+- **CLI** (terminal, via tmux): `zagent`, com o Claude à esquerda e o monitor de agentes à direita
+
+Os dois usam o mesmo orquestrador, o mesmo servidor MCP e as mesmas regras de segurança.
+
 ## Como funciona
 
 1. O terminal da esquerda é o `claude` normal, num PTY real. Ele roda com um servidor MCP local do
@@ -42,6 +49,24 @@ aparecem no terminal da esquerda, normalmente.
 - **Windows/macOS:** o `node-pty` já vem pré-compilado.
 - **Linux:** o `npm install` compila o `node-pty` (precisa de `make`, `g++` e `python3`).
 
+### CLI
+
+```bash
+npm install
+npm run build
+npm link            # deixa o comando `zagent` disponível no terminal
+cd ~/meu-projeto
+zagent              # ou: zagent --model sonnet --max 3
+```
+
+- Precisa do **tmux** (`brew install tmux` / `apt install tmux`). O mouse funciona: clique para trocar de painel e arraste a borda para redimensionar.
+- **Sem tmux (Windows):** rode `zagent monitor` num terminal e `zagent claude` em outro, na mesma pasta. No Windows Terminal, `Alt+Shift+D` divide a janela.
+- **Teclas do monitor:** `↑↓` escolhe o agente · `enter` abre o log completo · `s` para · `m` manda mensagem · `n` abre um agente na mão · `x` fecha o card · `c` mostra o comando de merge · `q` sai (para os agentes e fecha a sessão).
+- O monitor toca o sino do terminal quando um agente termina ou falha.
+- `zagent help` lista todas as opções. O padrão fica em `~/.zagent/settings.json`.
+
+### Desktop
+
 Clique no caminho no topo para trocar a pasta do projeto. Use `Ctrl+B` para mostrar ou ocultar o painel de agentes.
 
 ## Segurança: o que protege e o que não protege
@@ -68,13 +93,15 @@ Seja realista sobre esses limites:
 npm run build
 xvfb-run node test/e2e.mjs    # usa um claude falso (scripts/fake-claude.mjs), não gasta tokens
 xvfb-run node test/real.mjs   # usa o Claude Code de verdade (gasta tokens)
+node test/cli-e2e.mjs         # CLI com claude falso (precisa de tmux)
+./test/cli-real.sh            # CLI com o Claude de verdade (gasta tokens)
 ```
 
 No macOS e no Windows, rode sem o `xvfb-run`.
 
 ## Ainda não tem
 
-- Instalador (.exe/.dmg). Por enquanto é só `npm start`.
+- Instalador (.exe/.dmg) e pacote no npm. Por enquanto é pelo código-fonte.
 - Persistência dos cards depois de fechar o app (os worktrees e as branches ficam salvos no git).
 - Botão de merge na interface. O merge é feito pelo Claude principal, com a sua confirmação, ou por você.
 - Vários projetos ou abas ao mesmo tempo.
@@ -87,4 +114,7 @@ src/main/orchestrator.ts  cria worktrees, roda os agentes, lê o stream-json
 src/main/mcpServer.ts     servidor MCP local (127.0.0.1 + token aleatório)
 src/main/claudeBin.ts     acha o executável do claude no Windows/macOS/Linux
 src/renderer/             interface (xterm.js + cards)
+src/cli/index.ts          CLI: comandos, sessão tmux, ligação monitor ↔ claude
+src/cli/monitor.ts        monitor de agentes no terminal (TUI)
+src/shared/mainClaude.ts  instruções e config do Claude principal (desktop e CLI)
 ```

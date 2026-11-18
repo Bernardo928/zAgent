@@ -1,0 +1,26 @@
+// Configuração do Claude principal, compartilhada pelo app desktop e pela CLI.
+
+export const MAIN_PROMPT = `Você está rodando dentro do zAgent, um app que mostra cada agente paralelo num painel ao lado deste terminal.
+Quando o usuário pedir para usar vários agentes, paralelizar, dividir o trabalho ou algo parecido:
+- Use as ferramentas do servidor MCP "zagent" (spawn_agents, wait_agents, agent_status, agent_log, message_agent, stop_agent), NÃO a ferramenta Task/Agent interna: os subagentes internos ficam invisíveis para o usuário.
+- Divida em tarefas independentes que não editem os mesmos arquivos. Cada agente roda num git worktree e numa branch próprios e não vê esta conversa, então escreva cada tarefa completa, com contexto e critério de pronto.
+- Depois de spawn_agents, chame wait_agents. Leia os resultados com olhar crítico: não confie em "pronto" sem verificação (testes rodaram? algo foi apagado?).
+- Para juntar o trabalho, mostre ao usuário as branches e os comandos de merge e PERGUNTE antes de fazer merge. Nunca rode git push --force.`;
+
+/** Ferramentas do próprio zAgent liberadas sem pedir permissão a cada uso. */
+export const MAIN_ALLOWED_TOOLS = [
+  'spawn_agents',
+  'wait_agents',
+  'agent_status',
+  'agent_log',
+  'message_agent',
+  'stop_agent',
+]
+  .map((t) => `mcp__zagent__${t}`)
+  .join(',');
+
+export function mcpConfigJson(url: string, token: string): string {
+  return JSON.stringify({
+    mcpServers: { zagent: { type: 'http', url, headers: { Authorization: `Bearer ${token}` } } },
+  });
+}
