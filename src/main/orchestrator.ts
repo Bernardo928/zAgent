@@ -112,6 +112,11 @@ interface AgentRuntime {
   boardCursor: number;
   /** Já juntou as branches das dependências (só na primeira execução). */
   afterPrepared?: boolean;
+  /**
+   * Terminou E já fez o commit automático e o diff. Só então a próxima etapa pode começar,
+   * a integração pode juntar a branch e o wait_agents pode responder.
+   */
+  settled?: boolean;
 }
 
 export interface SpawnRequest {
@@ -127,6 +132,7 @@ export interface SpawnRequest {
 }
 
 const TERMINAL = new Set(['done', 'failed', 'stopped']);
+const settled = (rt: { snap: { status: string }; settled?: boolean }) => TERMINAL.has(rt.snap.status) && rt.settled === true;
 const gitRun = (args: string[], cwd: string) => run('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout.trim());
 
 /** Se o repositório não tem nome/email do git, usa um genérico só para os commits do zAgent. */
@@ -398,7 +404,7 @@ export class Orchestrator {
   waitFor(ids: string[] | undefined, timeoutMs: number): Promise<AgentSnapshot[]> {
     const targets = (ids?.length ? ids.map((i) => this.get(i)) : this.order.map((i) => this.agents.get(i)))
       .filter((x): x is AgentRuntime => !!x);
-    const pending = targets.filter((t) => !TERMINAL.has(t.snap.status));
+    const pending = targets.filter((t) => !settled(t));
     if (!pending.length) return Promise.resolve(targets.map((t) => t.snap));
     return new Promise((res) => {
       let done = false;
@@ -411,7 +417,7 @@ export class Orchestrator {
       const timer = setTimeout(finish, timeoutMs);
       for (const t of pending) {
         t.waiters.push(() => {
-          if (targets.every((x) => TERMINAL.has(x.snap.status))) finish();
+          if (targets.every((x) => settled(x))) finish();
         });
       }
     });
@@ -429,13 +435,13 @@ export class Orchestrator {
       const rt = this.agents.get(id)!;
       if (rt.snap.status !== 'waiting') continue;
       const deps = (rt.snap.after ?? []).map((n) => this.get(n));
-      const bad = deps.find((d) => !d || d.snap.status === 'failed' || d.snap.status === 'stopped');
+      const bad = deps.find((d) => !d || ((d.snap.status === 'failed' || d.snap.status === 'stopped') && d.settled));
       if (bad !== undefined) {
         const who = bad ? bad.snap.name : (rt.snap.after ?? []).find((n) => !this.get(n));
         void this.finish(rt, 'stopped', `Pulado: a etapa anterior "${who}" não terminou com sucesso.`);
         continue;
       }
-      if (deps.every((d) => d!.snap.status === 'done')) {
+      if (deps.every((d) => d!.snap.status === 'done' && d!.settled)) {
         rt.snap.status = 'queued';
         rt.snap.activity = 'Na fila';
         this.push(rt, 'system', `Etapas anteriores concluídas: ${(rt.snap.after ?? []).join(', ')}`);
@@ -502,7 +508,7 @@ export class Orchestrator {
     const cfg = this.settings();
     const chosen = (opts.ids?.length ? opts.ids.map((i) => this.get(i)) : this.order.map((i) => this.agents.get(i)))
       .filter((x): x is AgentRuntime => !!x && x.snap.role !== 'reviewer');
-    const ready = chosen.filter((a) => a.snap.status === 'done' && a.snap.isolated && a.snap.branch);
+    const ready = chosen.filter((a) => a.snap.status === 'done' && a.settled && a.snap.isolated && a.snap.branch);
     const skipped = chosen.filter((a) => !ready.includes(a)).map((a) => `${a.snap.name} (${a.snap.status})`);
     if (!ready.length) throw new Error('Nenhum agente concluído com branch própria para juntar.');
 
@@ -643,6 +649,7 @@ export class Orchestrator {
     const prompt = rt.queuedPrompt!;
     rt.queuedPrompt = undefined;
     rt.snap.status = 'running';
+    rt.settled = false;
     rt.snap.startedAt ??= Date.now();
     rt.snap.activity = 'Iniciando…';
     let text = prompt.text;
@@ -833,6 +840,7 @@ export class Orchestrator {
     if (rt.proc && rt.snap.status !== 'running') killTree(rt.proc);
     if (status === 'done') await this.autoCommit(rt);
     await this.computeDiff(rt);
+    rt.settled = true;
     this.flush(rt);
     const waiters = rt.waiters.splice(0);
     waiters.forEach((w) => w());

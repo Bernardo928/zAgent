@@ -23,7 +23,7 @@ function report(a: AgentSnapshot, full: boolean): string {
   ];
   if (a.diffStat) lines.push(`Mudanças: ${a.diffStat}`);
   if (a.costUsd) lines.push(`Custo: US$ ${a.costUsd.toFixed(4)} · ${a.turns} turnos · ${a.toolCalls} ferramentas`);
-  if (a.status === 'running' || a.status === 'queued') lines.push(`Agora: ${a.activity}`);
+  if (a.status === 'running' || a.status === 'queued' || a.status === 'waiting') lines.push(`Agora: ${a.activity}`);
   if (a.result) lines.push('', full ? a.result : a.result.slice(0, 600));
   if (a.error) lines.push('', `Erro: ${a.error}`);
   return lines.join('\n');
@@ -162,7 +162,7 @@ function buildServer(orch: Orchestrator): McpServer {
     },
     async ({ ids, timeout_seconds }) => {
       const res = await orch.waitFor(ids, (timeout_seconds ?? 600) * 1000);
-      const pending = res.filter((a) => a.status === 'running' || a.status === 'queued').length;
+      const pending = res.filter((a) => a.status === 'running' || a.status === 'queued' || a.status === 'waiting').length;
       return text(
         (pending ? `${pending} agente(s) ainda rodando. Chame wait_agents de novo.\n\n` : 'Todos terminaram.\n\n') +
           res.map((a) => report(a, true)).join('\n\n---\n\n'),
