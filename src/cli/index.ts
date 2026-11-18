@@ -31,6 +31,8 @@ Opções:
   --no-isolate          não cria git worktree por agente (não recomendado)
   --agent <nome>        claude | opencode: pula a tela de escolha
   --no-intro            pula a animação de abertura
+  --no-terminal         não abre o painel de terminal para você
+  --layout <tipo>       wide (tudo numa tela) | narrow (abas, para celular). Padrão: pela largura da tela
 
   --workers <nome>      claude | opencode: CLI dos agentes paralelos (padrão: a mesma do agente principal)
 
@@ -46,6 +48,9 @@ interface Parsed {
   savedAgent?: MainAgent;
   noIntro?: boolean;
   workers?: WorkerAgent;
+  /** Mostra o painel de terminal do usuário (padrão: sim). */
+  terminal: boolean;
+  layout?: 'wide' | 'narrow';
   readyFile?: string;
   hint?: boolean;
   extra: string[];
@@ -72,7 +77,7 @@ function parse(argv: string[]): Parsed {
   settings.workspace = process.cwd();
   const savedAgent = (saved as { mainAgent?: MainAgent }).mainAgent;
   delete (settings as Partial<Settings> & { mainAgent?: unknown }).mainAgent;
-  const out: Parsed = { cmd, settings, extra, savedAgent };
+  const out: Parsed = { cmd, settings, extra, savedAgent, terminal: true };
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -119,6 +124,15 @@ function parse(argv: string[]): Parsed {
       case '--no-intro':
         out.noIntro = true;
         break;
+      case '--no-terminal':
+        out.terminal = false;
+        break;
+      case '--layout': {
+        const v = val();
+        if (v !== 'wide' && v !== 'narrow') die('--layout deve ser wide ou narrow.');
+        out.layout = v;
+        break;
+      }
       case '--workers': {
         const v = val();
         if (v !== 'claude' && v !== 'opencode') die('--workers deve ser claude ou opencode.');
@@ -345,10 +359,13 @@ async function runAll(p: Parsed): Promise<void> {
   // -u: força UTF-8 (sem isso, terminais com locale ruim mostram bordas e ícones quebrados).
   const tmux = (...args: string[]) => spawnSync('tmux', ['-u', ...args], { encoding: 'utf8' });
 
+  // Tela estreita (celular): 3 painéis lado a lado não cabem. Vira duas abas:
+  // "Trabalho" (agente em cima, terminal embaixo) e "Agentes" (monitor).
+  const narrow = p.layout === 'narrow' || (p.layout !== 'wide' && cols < 110);
   const monitorCmd = [...self, 'monitor', ...settingsFlags(p.settings), '--ready-file', ready].map(q).join(' ');
   const r = tmux(
     'new-session', '-d', '-s', session, '-x', String(cols), '-y', String(rows),
-    '-c', p.settings.workspace, '-e', `ZAGENT_TMUX_SESSION=${session}`, monitorCmd,
+    '-c', p.settings.workspace, '-e', `ZAGENT_TMUX_SESSION=${session}`, '-e', `ZAGENT_LAYOUT=${narrow ? 'narrow' : 'wide'}`, monitorCmd,
   );
   if (r.status !== 0) die(`Não consegui abrir o tmux: ${r.stderr}`);
 
@@ -369,22 +386,49 @@ async function runAll(p: Parsed): Promise<void> {
   const cmd = mainCommand(agent, info, p.extra);
   const envPrefix = Object.entries(cmd.env).map(([k, v]) => `${k}=${q(v)} `).join('');
   const mainLine = envPrefix + [cmd.bin, ...cmd.args].map(q).join(' ');
-  const left = `${mainLine}; tmux kill-session -t ${q(session)}`;
-  tmux('split-window', '-h', '-b', '-l', '58%', '-t', `${session}:0`, '-c', p.settings.workspace, left);
+  const agentCmd = `${mainLine}; tmux kill-session -t ${q(session)}`;
+  // Seu terminal: um shell normal na pasta do projeto. Sair dele (exit) só fecha esse painel.
+  const userShell = process.env.SHELL && existsSync(process.env.SHELL) ? process.env.SHELL : existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh';
+  const ws = p.settings.workspace;
+  const paneId = (r: ReturnType<typeof tmux>) => r.stdout.trim();
+  const monitorPane = paneId(tmux('display-message', '-p', '-t', `${session}:0`, '#{pane_id}'));
+  const label = (pane: string, text: string) => tmux('set-option', '-p', '-t', pane, '@zlabel', text);
 
-  // Visual: títulos nos painéis, mouse para clicar/redimensionar, barra de status discreta.
+  let agentPane: string;
+  let shellPane = '';
+  if (narrow) {
+    tmux('rename-window', '-t', `${session}:0`, 'Agentes');
+    agentPane = paneId(tmux('new-window', '-P', '-F', '#{pane_id}', '-t', session, '-n', 'Trabalho', '-c', ws, agentCmd));
+    if (p.terminal) shellPane = paneId(tmux('split-window', '-v', '-P', '-F', '#{pane_id}', '-l', '35%', '-t', agentPane, '-c', ws, userShell));
+  } else {
+    agentPane = paneId(tmux('split-window', '-h', '-b', '-P', '-F', '#{pane_id}', '-l', '58%', '-t', monitorPane, '-c', ws, agentCmd));
+    if (p.terminal) shellPane = paneId(tmux('split-window', '-v', '-P', '-F', '#{pane_id}', '-l', '32%', '-t', agentPane, '-c', ws, userShell));
+  }
+
+  // Visual: rótulos fixos nos painéis (o Claude troca o título do terminal, então não usamos o título),
+  // mouse para clicar/redimensionar, barra de status com as abas.
+  label(monitorPane, 'Agentes');
+  label(agentPane, AGENT_LABEL[agent]);
+  if (shellPane) label(shellPane, 'Terminal');
   tmux('set-option', '-t', session, 'mouse', 'on');
   tmux('set-option', '-t', session, 'pane-border-status', 'top');
-  tmux('set-option', '-t', session, 'pane-border-format', ' #{pane_title} ');
+  tmux('set-option', '-t', session, 'pane-border-format', ' #{@zlabel} ');
   tmux('set-option', '-t', session, 'pane-active-border-style', 'fg=colour215');
   tmux('set-option', '-t', session, 'pane-border-style', 'fg=colour238');
   tmux('set-option', '-t', session, 'status-style', 'bg=colour234,fg=colour244');
-  tmux('set-option', '-t', session, 'status-left', '#[fg=colour215,bold] zAgent #[default]');
-  tmux('set-option', '-t', session, 'status-right', ' clique para trocar de painel · q no monitor sai ');
-  // Impede o Claude de trocar o título do painel (tmux 3.3+; versões antigas só ignoram).
-  for (const pane of ['0.0', '0.1']) tmux('set-option', '-p', '-t', `${session}:${pane}`, 'allow-set-title', 'off');
-  tmux('select-pane', '-t', `${session}:0.1`, '-T', 'Agentes');
-  tmux('select-pane', '-t', `${session}:0.0`, '-T', AGENT_LABEL[agent]);
+  // No celular a barra é estreita: só o "z" e as abas, para as abas caberem.
+  tmux('set-option', '-t', session, 'status-left', narrow ? '#[fg=colour215,bold] z #[default]' : '#[fg=colour215,bold] zAgent #[default]');
+  // Formato das abas é opção de janela: aplica em cada uma.
+  for (const w of tmux('list-windows', '-t', session, '-F', '#{window_id}').stdout.split('\n').filter(Boolean)) {
+    tmux('set-option', '-w', '-t', w, 'window-status-format', ' #W ');
+    tmux('set-option', '-w', '-t', w, 'window-status-current-format', '#[fg=colour255,bg=colour61,bold] #W #[default]');
+  }
+  tmux(
+    'set-option', '-t', session, 'status-right',
+    narrow ? '' : ' clique para trocar de painel · q no monitor sai ',
+  );
+  if (narrow) tmux('select-window', '-t', `${session}:Trabalho`);
+  tmux('select-pane', '-t', agentPane);
 
   if (process.env.TMUX) {
     // Já dentro de um tmux: troca de sessão e volta na hora, então não há tela de saída.

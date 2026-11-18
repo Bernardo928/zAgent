@@ -370,16 +370,27 @@ export class Monitor {
   }
 
   private empty(W: number, H: number): string[] {
-    const msg = [
-      bold('Nenhum agente ainda'),
-      '',
-      ...(this.hint ? [C.warn(`Abra outro terminal nesta pasta e rode: ${this.hint}`), ''] : []),
-      C.muted(this.hint ? 'Depois peça ao Claude algo como:' : 'Peça ao Claude, no painel ao lado, algo como:'),
-      C.text('"use 3 agentes: um para a API, um para o front e um para os testes"'),
-      '',
-      C.muted('Cada agente aparece aqui, num card, trabalhando numa branch própria.'),
-      C.muted('Tecla n abre um agente manualmente.'),
+    const where = this.hint
+      ? 'Depois peça ao Claude algo como:'
+      : process.env.ZAGENT_LAYOUT === 'narrow'
+        ? 'Peça ao Claude, na aba Trabalho, algo como:'
+        : 'Peça ao Claude, no painel ao lado, algo como:';
+    const parts: Array<[string, (s: string) => string]> = [
+      ['Nenhum agente ainda', bold],
+      ['', C.muted],
+      ...(this.hint ? ([[`Abra outro terminal nesta pasta e rode: ${this.hint}`, C.warn], ['', C.muted]] as Array<[string, (s: string) => string]>) : []),
+      [where, C.muted],
+      ['"use 3 agentes: um para a API, um para o front e um para os testes"', C.text],
+      ['', C.muted],
+      ['Cada agente aparece aqui, num card, trabalhando numa branch própria.', C.muted],
+      ['Tecla n abre um agente manualmente.', C.muted],
     ];
+    // Quebra as frases longas para caber em tela estreita (celular).
+    const msg: string[] = [];
+    for (const [t, color] of parts) {
+      if (!t) msg.push('');
+      else for (const l of wrap(t, Math.max(16, W - 4))) msg.push(color(l));
+    }
     const top = Math.max(0, Math.floor((H - msg.length) / 2));
     const out: string[] = Array(top).fill('');
     for (const m of msg) {
