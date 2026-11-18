@@ -59,6 +59,8 @@ cd ~/meu-projeto
 zagent              # ou: zagent --model sonnet --max 3
 ```
 
+- **Abertura:** um portal animado em azul, roxo e branco, seguido da pergunta *"Qual modelo escolher?"*, com **Claude Code** e **OpenCode**. Use `←→` (ou `1`/`2`) e `enter`. Qualquer tecla pula a animação. A escolha fica salva; `--agent claude|opencode` pula a tela e `--no-intro` pula só a animação.
+- **OpenCode como agente principal:** o zAgent liga o OpenCode ao painel de agentes por um arquivo de config próprio (`OPENCODE_CONFIG`), sem alterar a sua config. **Os agentes paralelos continuam sendo Claude Code**, então você precisa dos dois instalados.
 - Precisa do **tmux** (`brew install tmux` / `apt install tmux`). O mouse funciona: clique para trocar de painel e arraste a borda para redimensionar.
 - **Android (Termux / proot-distro):** só a CLI funciona. O Electron não existe para Android, então o `npm install` pula o app desktop sozinho. Dentro do proot (Debian/Ubuntu), use o Node da distro, não o do Termux: `node -p process.platform` precisa responder `linux`.
 - **Sem tmux (Windows):** rode `zagent monitor` num terminal e `zagent claude` em outro, na mesma pasta. No Windows Terminal, `Alt+Shift+D` divide a janela.
@@ -117,5 +119,6 @@ src/main/claudeBin.ts     acha o executável do claude no Windows/macOS/Linux
 src/renderer/             interface (xterm.js + cards)
 src/cli/index.ts          CLI: comandos, sessão tmux, ligação monitor ↔ claude
 src/cli/monitor.ts        monitor de agentes no terminal (TUI)
+src/cli/intro.ts          abertura com o portal animado e escolha do agente principal
 src/shared/mainClaude.ts  instruções e config do Claude principal (desktop e CLI)
 ```

@@ -8,17 +8,19 @@ import { startMcpServer } from '../main/mcpServer';
 import { Orchestrator } from '../main/orchestrator';
 import { MAIN_ALLOWED_TOOLS, MAIN_PROMPT, mcpConfigJson } from '../shared/mainClaude';
 import type { Settings, WorkerPermission } from '../shared/types';
+import { runIntro, type MainAgent } from './intro';
 import { Monitor } from './monitor';
 
 const HOME = process.env.ZAGENT_HOME || join(homedir(), '.zagent');
 const RUN = join(HOME, 'run');
 
-const HELP = `zagent: Claude Code com um painel para cada agente paralelo, direto no terminal.
+const HELP = `zagent: Claude Code ou OpenCode com um painel para cada agente paralelo, direto no terminal.
 
 Uso:
-  zagent [opções] [-- args extras do claude]   abre o Claude à esquerda e o monitor à direita (tmux)
-  zagent monitor [opções]                      só o monitor (use quando não tiver tmux)
-  zagent claude [-- args extras]               abre um Claude ligado ao monitor que já está rodando
+  zagent [opções] [-- args extras]   abertura + escolha do agente, depois agente à esquerda e monitor à direita (tmux)
+  zagent monitor [opções]            só o monitor (use quando não tiver tmux)
+  zagent claude [-- args extras]     abre o Claude Code ligado ao monitor que já está rodando
+  zagent opencode [-- args extras]   abre o OpenCode ligado ao monitor que já está rodando
   zagent help
 
 Opções:
@@ -27,13 +29,20 @@ Opções:
   --permission <modo>   safe | standard | full  (padrão: standard)
   --max <n>             máximo de agentes ao mesmo tempo (padrão: 4)
   --no-isolate          não cria git worktree por agente (não recomendado)
+  --agent <nome>        claude | opencode: pula a tela de escolha
+  --no-intro            pula a animação de abertura
+
+Os agentes paralelos sempre rodam com Claude Code, mesmo com o OpenCode como agente principal.
 
 No monitor: ↑↓ escolhe · enter abre · s para · m manda mensagem · n novo agente · x fecha · q sai
 Configuração padrão em ${join(HOME, 'settings.json')}.`;
 
 interface Parsed {
-  cmd: 'run' | 'monitor' | 'claude' | 'help';
+  cmd: 'run' | 'monitor' | 'claude' | 'opencode' | 'help';
   settings: Settings;
+  agent?: MainAgent;
+  savedAgent?: MainAgent;
+  noIntro?: boolean;
   readyFile?: string;
   hint?: boolean;
   extra: string[];
@@ -58,7 +67,9 @@ function parse(argv: string[]): Parsed {
     ...saved,
   };
   settings.workspace = process.cwd();
-  const out: Parsed = { cmd, settings, extra };
+  const savedAgent = (saved as { mainAgent?: MainAgent }).mainAgent;
+  delete (settings as Partial<Settings> & { mainAgent?: unknown }).mainAgent;
+  const out: Parsed = { cmd, settings, extra, savedAgent };
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -70,6 +81,7 @@ function parse(argv: string[]): Parsed {
     switch (a) {
       case 'monitor':
       case 'claude':
+      case 'opencode':
       case 'help':
         out.cmd = a;
         break;
@@ -94,6 +106,15 @@ function parse(argv: string[]): Parsed {
         break;
       case '--no-isolate':
         settings.isolate = false;
+        break;
+      case '--agent': {
+        const v = val();
+        if (v !== 'claude' && v !== 'opencode') die('--agent deve ser claude ou opencode.');
+        out.agent = v;
+        break;
+      }
+      case '--no-intro':
+        out.noIntro = true;
         break;
       case '--ready-file':
         out.readyFile = val();
@@ -140,6 +161,46 @@ function alive(pid: number): boolean {
   }
 }
 
+/** Acha um executável no PATH (no shell de login, como o usuário veria). */
+function which(name: string): string | null {
+  if (process.platform === 'win32') {
+    const r = spawnSync('where', [name], { encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.split(/\r?\n/)[0].trim() : null;
+  }
+  const r = spawnSync(process.env.SHELL || 'sh', ['-lc', `command -v ${name}`], { encoding: 'utf8' });
+  return r.status === 0 && r.stdout.trim() ? r.stdout.trim().split('\n').pop()!.trim() : null;
+}
+
+const AGENT_LABEL: Record<MainAgent, string> = { claude: 'Claude Code', opencode: 'OpenCode' };
+
+/**
+ * Config extra do OpenCode: liga o servidor MCP do zAgent e as instruções do agente principal.
+ * Vai num arquivo próprio (OPENCODE_CONFIG), somado à config normal do usuário, sem alterá-la.
+ */
+function opencodeConfig(s: SessionInfo): string {
+  const mcp = JSON.parse(readFileSync(s.mcpConfig, 'utf8')).mcpServers.zagent;
+  const file = join(RUN, `opencode-${s.pid}.json`);
+  writeFileSync(
+    file,
+    JSON.stringify({
+      $schema: 'https://opencode.ai/config.json',
+      mcp: { zagent: { type: 'remote', url: mcp.url, headers: mcp.headers, enabled: true } },
+      instructions: [s.promptFile],
+    }),
+    { mode: 0o600 },
+  );
+  chmodSync(file, 0o600);
+  return file;
+}
+
+/** Comando, argumentos e variáveis para abrir o agente principal escolhido. */
+function mainCommand(agent: MainAgent, s: SessionInfo, extra: string[]) {
+  if (agent === 'opencode') {
+    return { bin: which('opencode') ?? 'opencode', args: extra, env: { OPENCODE_CONFIG: opencodeConfig(s) } };
+  }
+  return { bin: claudeBin(), args: claudeArgs(s, extra), env: {} as Record<string, string> };
+}
+
 function claudeArgs(s: SessionInfo, extra: string[]): string[] {
   return [
     '--mcp-config', s.mcpConfig,
@@ -174,7 +235,7 @@ async function runMonitor(p: Parsed): Promise<void> {
     orch.stopAll();
     monitor?.close();
     mcp.close();
-    for (const f of [mcpConfig, sessionFile]) rmSync(f, { force: true });
+    for (const f of [mcpConfig, sessionFile, join(RUN, `opencode-${process.pid}.json`)]) rmSync(f, { force: true });
     if (process.env.ZAGENT_TMUX_SESSION) {
       spawnSync('tmux', ['kill-session', '-t', process.env.ZAGENT_TMUX_SESSION], { stdio: 'ignore' });
     }
@@ -184,7 +245,7 @@ async function runMonitor(p: Parsed): Promise<void> {
   process.on('SIGHUP', () => shutdown(0));
   process.on('SIGTERM', () => shutdown(0));
 
-  monitor = new Monitor(orch, p.settings.workspace, () => shutdown(0), p.hint ? 'zagent claude' : undefined);
+  monitor = new Monitor(orch, p.settings.workspace, () => shutdown(0), p.hint ? `zagent ${p.agent ?? 'claude'}` : undefined);
   monitor.start();
 }
 
@@ -205,25 +266,48 @@ function findSession(workspace: string): SessionInfo | null {
   return sessions.find((s) => s.workspace === workspace) ?? sessions[0] ?? null;
 }
 
-function runClaude(p: Parsed): void {
+function runMain(p: Parsed, agent: MainAgent): void {
   const s = findSession(p.settings.workspace);
   if (!s) die('Nenhum monitor rodando. Abra outro terminal e rode `zagent monitor` primeiro (ou só `zagent`, com tmux).');
   if (s.workspace !== p.settings.workspace) {
     process.stderr.write(`Aviso: o monitor está na pasta ${s.workspace}. Os agentes vão trabalhar lá.\n`);
   }
-  const bin = claudeBin();
-  const shell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(bin);
-  const child = spawn(bin, claudeArgs(s, p.extra), { stdio: 'inherit', cwd: s.workspace, shell });
+  const cmd = mainCommand(agent, s, p.extra);
+  const shell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd.bin);
+  const child = spawn(cmd.bin, cmd.args, { stdio: 'inherit', cwd: s.workspace, shell, env: { ...process.env, ...cmd.env } });
   child.on('exit', (code) => process.exit(code ?? 0));
 }
 
 // ------------------------------------------------------------------ zagent (tmux)
+function saveAgentChoice(agent: MainAgent): void {
+  const file = join(HOME, 'settings.json');
+  let cur: Record<string, unknown> = {};
+  try {
+    cur = JSON.parse(readFileSync(file, 'utf8'));
+  } catch { /* primeiro uso */ }
+  mkdirSync(HOME, { recursive: true });
+  writeFileSync(file, JSON.stringify({ ...cur, mainAgent: agent }, null, 2));
+}
+
+/** Decide o agente principal: --agent, a tela de abertura ou a última escolha. */
+async function chooseAgent(p: Parsed): Promise<MainAgent | null> {
+  if (p.agent) return p.agent;
+  if (!process.stdout.isTTY || !process.stdin.isTTY) return p.savedAgent ?? 'claude';
+  const available = { claude: !!which('claude') || claudeBin() !== 'claude', opencode: !!which('opencode') };
+  const choice = await runIntro({ skipAnimation: p.noIntro, initial: p.savedAgent, available });
+  if (choice) saveAgentChoice(choice);
+  return choice;
+}
+
 async function runAll(p: Parsed): Promise<void> {
+  const agent = await chooseAgent(p);
+  if (!agent) return;
+  p.agent = agent;
   const hasTmux = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
   if (!hasTmux) {
     process.stderr.write(
       'tmux não encontrado, então vou abrir só o monitor aqui.\n' +
-        'Abra OUTRO terminal nesta mesma pasta e rode:  zagent claude\n\n' +
+        `Abra OUTRO terminal nesta mesma pasta e rode:  zagent ${agent}\n\n` +
         (process.platform === 'win32'
           ? 'Dica: no Windows Terminal, Alt+Shift+D divide a janela.\n'
           : 'Dica: instale o tmux (brew install tmux / apt install tmux) para abrir tudo junto.\n'),
@@ -262,10 +346,12 @@ async function runAll(p: Parsed): Promise<void> {
     die('O monitor não iniciou a tempo.');
   }
 
-  // Quando o Claude sair, o painel continua com um shell para você abrir de novo.
-  const claudeLine = [claudeBin(), ...claudeArgs(info, p.extra)].map(q).join(' ');
+  // Quando o agente sair, o painel continua com um shell para você abrir de novo.
+  const cmd = mainCommand(agent, info, p.extra);
+  const envPrefix = Object.entries(cmd.env).map(([k, v]) => `${k}=${q(v)} `).join('');
+  const mainLine = envPrefix + [cmd.bin, ...cmd.args].map(q).join(' ');
   const left =
-    `${claudeLine}; printf '\\n\\033[90mClaude encerrou. Rode "zagent claude" para abrir de novo, ou q no painel da direita para sair.\\033[0m\\n'; ` +
+    `${mainLine}; printf '\\n\\033[90m${AGENT_LABEL[agent]} encerrou. Rode "zagent ${agent}" para abrir de novo, ou q no painel da direita para sair.\\033[0m\\n'; ` +
     `exec "\${SHELL:-/bin/sh}"`;
   tmux('split-window', '-h', '-b', '-l', '58%', '-t', `${session}:0`, '-c', p.settings.workspace, left);
 
@@ -281,7 +367,7 @@ async function runAll(p: Parsed): Promise<void> {
   // Impede o Claude de trocar o título do painel (tmux 3.3+; versões antigas só ignoram).
   for (const pane of ['0.0', '0.1']) tmux('set-option', '-p', '-t', `${session}:${pane}`, 'allow-set-title', 'off');
   tmux('select-pane', '-t', `${session}:0.1`, '-T', 'Agentes');
-  tmux('select-pane', '-t', `${session}:0.0`, '-T', 'Claude Code');
+  tmux('select-pane', '-t', `${session}:0.0`, '-T', AGENT_LABEL[agent]);
 
   if (process.env.TMUX) {
     tmux('switch-client', '-t', session);
@@ -296,8 +382,8 @@ if (p.cmd === 'help') {
   process.stdout.write(HELP + '\n');
 } else if (p.cmd === 'monitor') {
   runMonitor(p).catch((e) => die(String(e?.stack ?? e)));
-} else if (p.cmd === 'claude') {
-  runClaude(p);
+} else if (p.cmd === 'claude' || p.cmd === 'opencode') {
+  runMain(p, p.cmd);
 } else {
   runAll(p).catch((e) => die(String(e?.stack ?? e)));
 }
