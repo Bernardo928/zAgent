@@ -60,6 +60,7 @@ zagent              # ou: zagent --model sonnet --max 3
 ```
 
 - Precisa do **tmux** (`brew install tmux` / `apt install tmux`). O mouse funciona: clique para trocar de painel e arraste a borda para redimensionar.
+- **Android (Termux / proot-distro):** só a CLI funciona. O Electron não existe para Android, então o `npm install` pula o app desktop sozinho. Dentro do proot (Debian/Ubuntu), use o Node da distro, não o do Termux: `node -p process.platform` precisa responder `linux`.
 - **Sem tmux (Windows):** rode `zagent monitor` num terminal e `zagent claude` em outro, na mesma pasta. No Windows Terminal, `Alt+Shift+D` divide a janela.
 - **Teclas do monitor:** `↑↓` escolhe o agente · `enter` abre o log completo · `s` para · `m` manda mensagem · `n` abre um agente na mão · `x` fecha o card · `c` mostra o comando de merge · `q` sai (para os agentes e fecha a sessão).
 - O monitor toca o sino do terminal quando um agente termina ou falha.
