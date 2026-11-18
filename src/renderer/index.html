@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:"
+    />
+    <title>zAgent</title>
+    <link rel="stylesheet" href="./xterm.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand" aria-label="zAgent">
+        <span class="brand-mark">z</span>
+        <span class="brand-name">zAgent</span>
+      </div>
+      <button class="workspace" id="workspace" title="Trocar a pasta do projeto">
+        <span class="icon" data-icon="folder"></span>
+        <span id="workspace-path">…</span>
+      </button>
+      <div class="spacer"></div>
+      <div class="stats" id="stats" aria-live="polite"></div>
+      <button class="btn ghost" id="toggle-panel" title="Mostrar/ocultar agentes (Ctrl+B)">
+        <span class="icon" data-icon="panel"></span><span>Agentes</span>
+        <span class="count" id="agent-count">0</span>
+      </button>
+      <button class="btn" id="new-agent" title="Abrir um agente manualmente">
+        <span class="icon" data-icon="plus"></span><span>Agente</span>
+      </button>
+      <button class="btn ghost icon-only" id="open-settings" title="Configurações" aria-label="Configurações">
+        <span class="icon" data-icon="settings"></span>
+      </button>
+    </header>
+
+    <div class="banner" id="banner" hidden></div>
+
+    <main class="layout" id="layout">
+      <section class="main-pane" aria-label="Claude Code principal">
+        <div class="pane-head">
+          <span class="dot live" id="main-dot"></span>
+          <span class="pane-title">Claude Code</span>
+          <span class="pane-sub">principal · peça "use vários agentes" e eles abrem ao lado</span>
+          <div class="spacer"></div>
+          <button class="btn ghost small" id="restart-main" title="Reiniciar o Claude principal">
+            <span class="icon" data-icon="refresh"></span><span>Reiniciar</span>
+          </button>
+        </div>
+        <div class="terminal-wrap"><div id="terminal"></div></div>
+      </section>
+
+      <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" tabindex="0"></div>
+
+      <section class="agents-pane" id="agents-pane" aria-label="Agentes paralelos">
+        <div class="pane-head">
+          <span class="pane-title">Agentes</span>
+          <span class="pane-sub" id="agents-sub"></span>
+          <div class="spacer"></div>
+          <button class="btn ghost small" id="clear-done" title="Fechar os cards dos agentes que já terminaram">
+            Limpar concluídos
+          </button>
+        </div>
+        <div class="agents-grid" id="agents-grid"></div>
+        <div class="empty" id="agents-empty">
+          <div class="empty-art">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <h3>Nenhum agente ainda</h3>
+          <p>
+            Peça ao Claude algo como <em>"use 3 agentes: um para a API, um para o front e um para os testes"</em>.
+            Cada agente abre aqui, num card próprio, trabalhando numa branch separada.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="new-agent-dialog" class="modal">
+      <form method="dialog" id="new-agent-form">
+        <h2>Novo agente</h2>
+        <label>Nome<input name="name" placeholder="ex.: testes-api" required maxlength="40" /></label>
+        <label
+          >Tarefa
+          <textarea
+            name="task"
+            rows="6"
+            required
+            placeholder="Instrução completa. O agente não vê a conversa principal."
+          ></textarea>
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" value="cancel" formnovalidate>Cancelar</button>
+          <button class="btn primary" value="ok">Abrir agente</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="message-dialog" class="modal">
+      <form method="dialog" id="message-form">
+        <h2>Mensagem para <span id="message-target"></span></h2>
+        <textarea name="message" rows="5" required placeholder="Ex.: os testes de login ainda falham, corrija."></textarea>
+        <div class="modal-actions">
+          <button class="btn ghost" value="cancel" formnovalidate>Cancelar</button>
+          <button class="btn primary" value="ok">Enviar</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="settings-dialog" class="modal wide">
+      <form method="dialog" id="settings-form">
+        <h2>Configurações</h2>
+
+        <fieldset>
+          <legend>Permissões dos agentes paralelos</legend>
+          <label class="radio">
+            <input type="radio" name="workerPermission" value="safe" />
+            <span><b>Seguro</b><small>Lê e edita arquivos. Não roda comandos (nem testes).</small></span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="workerPermission" value="standard" />
+            <span
+              ><b>Padrão</b
+              ><small>Edita e roda comandos, exceto os bloqueados: push, reset --hard, rm -rf, DROP, sudo…</small></span
+            >
+          </label>
+          <label class="radio danger">
+            <input type="radio" name="workerPermission" value="full" />
+            <span><b>Total</b><small>Pula todas as confirmações. Só use em projeto descartável.</small></span>
+          </label>
+        </fieldset>
+
+        <div class="row">
+          <label
+            >Modelo dos agentes
+            <select name="workerModel">
+              <option value="">Padrão do Claude Code</option>
+              <option value="opus">Opus</option>
+              <option value="sonnet">Sonnet</option>
+              <option value="haiku">Haiku</option>
+            </select>
+          </label>
+          <label>Máximo em paralelo<input type="number" name="maxConcurrent" min="1" max="12" /></label>
+        </div>
+
+        <label class="check">
+          <input type="checkbox" name="isolate" />
+          <span
+            ><b>Worktree por agente</b
+            ><small>Cada agente trabalha numa cópia e branch própria. Recomendado: sem isso, eles se atropelam.</small></span
+          >
+        </label>
+
+        <div class="modal-actions">
+          <button class="btn ghost" value="cancel" formnovalidate>Cancelar</button>
+          <button class="btn primary" value="ok">Salvar</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "name": "zagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workspace desktop: Claude Code principal + painel de monitoramento para cada agente paralelo.",
+  "main": "dist/main.js",
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.1",
+    "@types/node": "^26.6.6",
+    "electron": "^33.4.11",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "zod": "^4.6.7"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "dev": "node scripts/build.mjs --watch",
+    "typecheck": "tsc -p .",
+    "test:e2e": "node test/e2e.mjs"
+  }
+}
