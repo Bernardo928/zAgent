@@ -8,7 +8,7 @@ import { startMcpServer } from '../main/mcpServer';
 import { Orchestrator } from '../main/orchestrator';
 import { MAIN_ALLOWED_TOOLS, MAIN_PROMPT, mcpConfigJson } from '../shared/mainClaude';
 import type { Settings, WorkerAgent, WorkerPermission } from '../shared/types';
-import { runIntro, type MainAgent } from './intro';
+import { runIntro, runOutro, type MainAgent } from './intro';
 import { Monitor } from './monitor';
 
 const HOME = process.env.ZAGENT_HOME || join(homedir(), '.zagent');
@@ -287,10 +287,11 @@ function runMain(p: Parsed, agent: MainAgent): void {
   const shell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd.bin);
   const child = spawn(cmd.bin, cmd.args, { stdio: 'inherit', cwd: s.workspace, shell, env: { ...process.env, ...cmd.env, PWD: s.workspace } });
   // /exit no agente principal fecha o zAgent: avisa o monitor para parar os agentes e sair.
-  child.on('exit', (code) => {
+  child.on('exit', async (code) => {
     try {
       process.kill(s.pid, 'SIGTERM');
     } catch { /* monitor já tinha saído */ }
+    if (!p.noIntro) await runOutro();
     process.exit(code ?? 0);
   });
 }
@@ -386,9 +387,16 @@ async function runAll(p: Parsed): Promise<void> {
   tmux('select-pane', '-t', `${session}:0.0`, '-T', AGENT_LABEL[agent]);
 
   if (process.env.TMUX) {
+    // Já dentro de um tmux: troca de sessão e volta na hora, então não há tela de saída.
     tmux('switch-client', '-t', session);
   } else {
     spawnSync('tmux', ['-u', 'attach-session', '-t', session], { stdio: 'inherit' });
+    // Desanexou (Ctrl+B d)? Então o zAgent continua rodando: só avisa como voltar.
+    if (tmux('has-session', '-t', session).status === 0) {
+      process.stdout.write(`O zAgent continua rodando em segundo plano. Para voltar: tmux attach -t ${session}\n`);
+    } else if (!p.noIntro) {
+      await runOutro();
+    }
   }
 }
 

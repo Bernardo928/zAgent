@@ -50,7 +50,7 @@ function hash(x: number, y: number): number {
 }
 
 /** Cor e caractere de uma célula do portal no instante t (segundos). */
-function portalCell(x: number, y: number, t: number, cx: number, cy: number, R: number): [string, RGB] {
+function portalCell(x: number, y: number, t: number, cx: number, cy: number, R: number, starK = 1): [string, RGB] {
   // Células do terminal são ~2x mais altas que largas: compensa no eixo x.
   const dx = (x - cx) / 2.1;
   const dy = y - cy;
@@ -76,7 +76,7 @@ function portalCell(x: number, y: number, t: number, cx: number, cy: number, R: 
   if (rn > 1.2) {
     const h = hash(x, y);
     if (h < 0.016) {
-      star = 0.3 + 0.7 * Math.abs(Math.sin(t * 2.4 + h * 400));
+      star = (0.3 + 0.7 * Math.abs(Math.sin(t * 2.4 + h * 400))) * starK;
       starCh = STARS[Math.min(STARS.length - 1, Math.floor(star * STARS.length))];
     }
   }
@@ -237,6 +237,105 @@ function wrapText(s: string, w: number): string[] {
   }
   if (line) out.push(line);
   return out;
+}
+
+/**
+ * Saída: o portal se fecha. A espiral acelera, o anel encolhe até um ponto,
+ * solta um clarão e some; depois "até a próxima". Qualquer tecla pula.
+ */
+export function runOutro(): Promise<void> {
+  const out = process.stdout;
+  if (!out.isTTY) return Promise.resolve();
+  const COLLAPSE = 1.1; // segundos até virar um ponto
+  const FLASH = 0.35;
+  const BYE = 0.9;
+  const TOTAL = COLLAPSE + FLASH + BYE;
+  const start = Date.now();
+
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout | undefined;
+    const finish = () => {
+      clearInterval(timer);
+      process.stdin.off('keypress', finish);
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdin.pause();
+      out.write('\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?1049l');
+      resolve();
+    };
+
+    const draw = () => {
+      const W = Math.max(20, out.columns || 80);
+      const H = Math.max(8, out.rows || 24);
+      const t = (Date.now() - start) / 1000;
+      if (t >= TOTAL) return finish();
+      const cx = W / 2;
+      const cy = H / 2 - 1;
+      const R0 = Math.min(H * 0.36, (W / 2.1) * 0.4);
+
+      // Encolhe acelerando (ease-in) e gira cada vez mais rápido.
+      const k = clamp(t / COLLAPSE);
+      const R = R0 * (1 - k * k * k);
+      const spin = t + 4 * k * k * k;
+      const starK = 1 - k;
+
+      const rows: string[] = [];
+      for (let y = 0; y < H; y++) {
+        let line = bg(BG);
+        let last = '';
+        for (let x = 0; x < W; x++) {
+          let ch = ' ';
+          let col: RGB = BG;
+          if (t < COLLAPSE) {
+            [ch, col] = portalCell(x, y, spin, cx, cy, R, starK);
+          } else if (t < COLLAPSE + FLASH) {
+            // Clarão: um risco branco horizontal que abre e apaga.
+            const f = (t - COLLAPSE) / FLASH;
+            const half = (W * 0.45) * Math.sin(f * Math.PI);
+            const dy = Math.abs(y - cy);
+            const dx = Math.abs(x - cx);
+            if (dy < 0.6 && dx < half) {
+              const I = (1 - dx / Math.max(1, half)) * (1 - f * 0.6);
+              col = mix(BG, mix(PURPLE, WHITE, I), clamp(0.3 + I));
+              ch = I > 0.6 ? '━' : I > 0.25 ? '─' : '·';
+            } else if (dy < 1.6 && dx < half * 0.4) {
+              const I = (1 - dx / Math.max(1, half * 0.4)) * (1 - f) * 0.6;
+              if (I > 0.08) {
+                col = mix(BG, BLUE, clamp(0.3 + I));
+                ch = '·';
+              }
+            }
+          }
+          const q = col.map((v) => (v | 0) & 0xf8) as RGB;
+          const code = fg(q);
+          if (code !== last) {
+            line += code;
+            last = code;
+          }
+          line += ch;
+        }
+        rows.push(line);
+      }
+
+      // "até a próxima" aparece e some depois do clarão.
+      const tb = t - COLLAPSE - FLASH;
+      if (tb > 0) {
+        const msg = 'até a próxima';
+        const a = Math.sin(clamp(tb / BYE) * Math.PI);
+        const tx = Math.max(0, Math.round(W / 2 - msg.length / 2));
+        const ty = Math.round(cy);
+        rows[ty] = bg(BG) + ' '.repeat(tx) + fg(mix(BG, mix(PURPLE, WHITE, 0.55), a)) + msg + ' '.repeat(Math.max(0, W - tx - msg.length));
+      }
+      out.write('\x1b[H' + rows.map((r) => r + '\x1b[0m').join('\r\n'));
+    };
+
+    out.write('\x1b[?1049h\x1b[?25l\x1b[2J');
+    emitKeypressEvents(process.stdin);
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.once('keypress', finish);
+    timer = setInterval(draw, 40);
+    draw();
+  });
 }
 
 const visLen = (s: string) => [...s.replace(/\x1b\[[0-9;]*m/g, '')].length;
