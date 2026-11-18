@@ -8,7 +8,7 @@ WS=$(mktemp -d /tmp/zagent-clireal-XXXX)
   printf 'export function saudacao(nome) {\n  return "oi " + nome;\n}\n' > texto.js && git add -A && git commit -qm init )
 H=$(mktemp -d)
 CLI=$(pwd)/dist/cli.js
-LANG=C.UTF-8 tmux -u new-session -d -s outer -x 190 -y 50 "env -u TMUX ZAGENT_HOME=$H node $CLI --cwd $WS --model haiku"
+LANG=C.UTF-8 tmux -u new-session -d -s outer -x 190 -y 50 "env -u TMUX ZAGENT_HOME=$H node $CLI --cwd $WS --model haiku --agent claude --no-intro"
 sleep 4
 S=$(tmux ls -F '#{session_name}' | grep '^zagent-' | head -1)
 echo "sessão interna: $S"

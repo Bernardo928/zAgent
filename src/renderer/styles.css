@@ -150,6 +150,7 @@ body.mac .topbar { padding-left: 82px; }
 .s-failed { --c: var(--failed); }
 .s-stopped { --c: var(--stopped); }
 .s-queued { --c: var(--queued); }
+.s-waiting { --c: var(--warn); }
 [class*='s-'] > .dot, .dot[class*='s-'], .card .card-title .dot { background: var(--c); }
 .s-running > .dot, .dot.s-running, .card.s-running .card-title .dot { box-shadow: 0 0 0 0 var(--c); animation: pulse 1.6s infinite; }
 @keyframes pulse {
@@ -234,6 +235,7 @@ body.mac .topbar { padding-left: 82px; }
 .k-text .feed-tag::before { content: '›'; font-size: 13px; color: var(--muted); }
 .k-tool_error .feed-tag, .k-tool_error .feed-body, .k-stderr .feed-body { color: var(--failed); }
 .k-stderr .feed-tag, .k-blocked .feed-tag { color: var(--warn); }
+.k-message .feed-tag, .k-message .feed-body { color: var(--accent); }
 .k-blocked { background: rgba(232,195,90,.06); }
 .k-blocked .feed-body { color: var(--warn); }
 .k-stderr .feed-body { color: var(--warn); }

@@ -45,6 +45,7 @@ const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : Stri
 const fmtUsd = (n: number) => `US$ ${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`;
 
 const STATUS_LABEL: Record<AgentSnapshot['status'], string> = {
+  waiting: 'esperando',
   queued: 'na fila',
   running: 'rodando',
   done: 'concluído',
@@ -236,7 +237,7 @@ function elapsedText(a: AgentSnapshot): string {
   return fmtElapsed((a.endedAt ?? Date.now()) - a.startedAt);
 }
 
-const TAGS: Partial<Record<FeedItem['kind'], string>> = { tool_error: 'erro', system: 'info', stderr: 'aviso', result: 'Resultado final' };
+const TAGS: Partial<Record<FeedItem['kind'], string>> = { tool_error: 'erro', system: 'info', stderr: 'aviso', result: 'Resultado final', message: 'msg' };
 function appendFeed(c: CardState, items: FeedItem[]): void {
   const frag = document.createDocumentFragment();
   for (const it of items) {
@@ -345,6 +346,7 @@ function refreshSummary(): void {
   grid.classList.toggle('fit', list.length > 1 && list.length <= 4);
   const parts: string[] = [];
   if (n('running')) parts.push(`<span class="stat s-running"><span class="dot"></span>${n('running')} rodando</span>`);
+  if (n('waiting')) parts.push(`<span class="stat s-waiting"><span class="dot"></span>${n('waiting')} esperando</span>`);
   if (n('queued')) parts.push(`<span class="stat s-queued"><span class="dot"></span>${n('queued')} na fila</span>`);
   if (n('done')) parts.push(`<span class="stat s-done"><span class="dot"></span>${n('done')} concluído${n('done') > 1 ? 's' : ''}</span>`);
   if (n('failed')) parts.push(`<span class="stat s-failed"><span class="dot"></span>${n('failed')} falhou</span>`);

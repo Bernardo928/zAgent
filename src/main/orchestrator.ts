@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { execFileSync } from 'node:child_process';
 import { opencodeBin, spawnBin, spawnClaude } from './claudeBin';
-import type { AgentEvent, AgentSnapshot, FeedItem, Settings, WorkerAgent } from '../shared/types';
+import type { AgentEvent, AgentSnapshot, BoardMessage, FeedItem, IntegrationResult, Settings, WorkerAgent } from '../shared/types';
 
 const run = promisify(execFile);
 const FEED_LIMIT = 600;
@@ -76,7 +76,23 @@ Regras:
 - Nunca apague, recrie ou migre bancos de dados.
 - Se algo bloquear você (teste falhando, dependência de outro agente, permissão negada), PARE e explique no resumo final. Não contorne.
 - Ao terminar, se puder rodar git, faça commit das suas mudanças nesta branch (git add -A && git commit -m "...").
-- Termine com um resumo curto: o que mudou, arquivos tocados, o que foi verificado e o que NÃO foi.`;
+- Termine com um resumo curto: o que mudou, arquivos tocados, o que foi verificado e o que NÃO foi.
+Comunicação com os outros agentes (ferramentas board_read e board_post do servidor MCP "zagent"):
+- Logo no começo, rode board_read para ver avisos que já existem.
+- Quando mudar algo que afeta outros agentes (tipos, nomes, rotas de API, formato de dados, arquivos compartilhados), avise com board_post, curto e concreto.
+- Antes de terminar, rode board_read de novo e leve em conta o que chegou.
+- Não use o quadro para conversa fiada: cada mensagem custa tempo de todos.`;
+
+const REVIEWER_PROMPT = (merged: string[], conflicts: IntegrationResult['conflicts'], extra?: string) => `Você é o REVISOR DE INTEGRAÇÃO do zAgent.
+Esta pasta é uma branch de integração onde o zAgent juntou o trabalho destes agentes: ${merged.join(', ') || '(nenhum)'}.
+${conflicts.length ? `Estas branches NÃO entraram por conflito:\n${conflicts.map((c) => `- ${c.agent} (${c.branch}): ${c.files.join(', ')}`).join('\n')}\nTente trazer essas mudanças à mão (git show/diff da branch) e resolva o conflito com cuidado.\n` : ''}
+Seu trabalho:
+1. Descubra como o projeto é construído e testado (package.json, Makefile, README) e rode build e testes.
+2. Confira se as partes funcionam JUNTAS (tipos, imports, rotas, nomes que um agente mudou e outro usa).
+3. Corrija SÓ problemas de integração. Não reescreva o que funciona, não adicione funcionalidade, não apague testes.
+4. Faça commit das correções nesta branch.
+5. Termine com um relatório: o que rodou, o que passou, o que falhou, o que você corrigiu, e se a branch está pronta para merge.
+${extra ? `\nInstruções extras: ${extra}` : ''}`;
 
 interface AgentRuntime {
   snap: AgentSnapshot;
@@ -90,6 +106,12 @@ interface AgentRuntime {
   queuedPrompt?: { text: string; resume: boolean };
   /** Última resposta em texto (o OpenCode não manda um evento final com o resumo). */
   lastText?: string;
+  /** Token do endpoint MCP só deste agente (quadro de mensagens). */
+  token: string;
+  /** Até onde este agente já leu o quadro. */
+  boardCursor: number;
+  /** Já juntou as branches das dependências (só na primeira execução). */
+  afterPrepared?: boolean;
 }
 
 export interface SpawnRequest {
@@ -97,9 +119,23 @@ export interface SpawnRequest {
   task: string;
   isolate?: boolean;
   origin: 'claude' | 'user';
+  /** Nomes dos agentes que precisam terminar antes (o resultado deles vai junto na tarefa). */
+  after?: string[];
+  /** Usa uma pasta/branch já existente em vez de criar um worktree (revisor da integração). */
+  existing?: { cwd: string; branch: string; baseRef: string };
+  role?: 'reviewer';
 }
 
 const TERMINAL = new Set(['done', 'failed', 'stopped']);
+const gitRun = (args: string[], cwd: string) => run('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout.trim());
+
+/** Se o repositório não tem nome/email do git, usa um genérico só para os commits do zAgent. */
+async function gitIdentity(cwd: string): Promise<string[]> {
+  try {
+    if ((await gitRun(['config', 'user.email'], cwd)) && (await gitRun(['config', 'user.name'], cwd))) return [];
+  } catch { /* sem configuração */ }
+  return ['-c', 'user.name=zAgent', '-c', 'user.email=zagent@localhost'];
+}
 
 function slug(s: string): string {
   return (
@@ -158,6 +194,10 @@ function contentText(c: unknown): string {
 export class Orchestrator {
   private agents = new Map<string, AgentRuntime>();
   private order: string[] = [];
+  private board: BoardMessage[] = [];
+  private boardSeq = 0;
+  private mcpBase = '';
+  private mainBoardCursor = 0;
 
   constructor(
     private settings: () => Settings,
@@ -170,17 +210,94 @@ export class Orchestrator {
   }
 
   get(id: string): AgentRuntime | undefined {
-    return this.agents.get(id) ?? [...this.agents.values()].find((a) => a.snap.name === id);
+    if (this.agents.has(id)) return this.agents.get(id);
+    // Pelo nome: o mais recente com esse nome.
+    return [...this.agents.values()].reverse().find((a) => a.snap.name === id);
+  }
+
+  /** URL base do servidor MCP (para dar a cada agente o endpoint do quadro). */
+  setMcpBase(url: string): void {
+    this.mcpBase = url.replace(/\/mcp$/, '');
+  }
+
+  /** Valida o token do endpoint de um agente: /agent/<id>. */
+  agentByToken(id: string, token: string): AgentRuntime | undefined {
+    const rt = this.agents.get(id);
+    return rt && rt.token === token ? rt : undefined;
+  }
+
+  // ---------------------------------------------------------------- quadro de mensagens
+
+  /** Publica no quadro. `to` = nome de um agente ou "todos". */
+  post(from: string, to: string, text: string): BoardMessage {
+    const target = to.trim() || 'todos';
+    if (target !== 'todos' && target !== 'principal' && !this.get(target)) throw new Error(`Não existe agente "${target}".`);
+    const msg: BoardMessage = { seq: ++this.boardSeq, at: Date.now(), from, to: target, text: text.trim() };
+    this.board.push(msg);
+    for (const rt of this.agents.values()) {
+      if (rt.snap.name === from) this.push(rt, 'message', `→ ${target}: ${msg.text}`);
+      else if (target === 'todos' || target === rt.snap.name) this.push(rt, 'message', `← ${from}: ${msg.text}`);
+      else continue;
+      this.scheduleFlush(rt);
+    }
+    return msg;
+  }
+
+  /** Mensagens novas para `name` (enviadas a ele ou a todos, menos as dele). Avança o cursor. */
+  readBoard(name: string): BoardMessage[] {
+    const rt = name === 'principal' ? undefined : this.get(name);
+    const cursor = rt ? rt.boardCursor : this.mainBoardCursor;
+    const msgs = this.board.filter((m) => m.seq > cursor && m.from !== name && (m.to === 'todos' || m.to === name));
+    if (rt) rt.boardCursor = this.boardSeq;
+    else this.mainBoardCursor = this.boardSeq;
+    return msgs;
+  }
+
+  boardAll(): BoardMessage[] {
+    return [...this.board];
   }
 
   feed(id: string): FeedItem[] {
     return this.get(id)?.feed ?? [];
   }
 
+  /** Abre vários de uma vez, validando as dependências entre eles (nomes e ciclos). */
+  async spawnMany(reqs: SpawnRequest[]): Promise<AgentSnapshot[]> {
+    const batch = new Set(reqs.map((r) => r.name.trim()));
+    const deps = new Map(reqs.map((r) => [r.name.trim(), (r.after ?? []).map((a) => a.trim())]));
+    for (const [name, after] of deps) {
+      for (const a of after) {
+        if (a === name) throw new Error(`"${name}" não pode depender de si mesmo.`);
+        if (!batch.has(a) && !this.get(a)) throw new Error(`"${name}" depende de "${a}", que não existe.`);
+      }
+    }
+    // Ciclo (a depende de b, b depende de a) travaria os dois para sempre.
+    const state = new Map<string, number>();
+    const visit = (n: string, path: string[]): void => {
+      if (state.get(n) === 2) return;
+      if (state.get(n) === 1) throw new Error(`Dependência circular: ${[...path, n].join(' → ')}`);
+      state.set(n, 1);
+      for (const d of deps.get(n) ?? []) if (deps.has(d)) visit(d, [...path, n]);
+      state.set(n, 2);
+    };
+    for (const n of deps.keys()) visit(n, []);
+
+    const out: AgentSnapshot[] = [];
+    for (const r of reqs) out.push(await this.spawn(r));
+    return out;
+  }
+
   async spawn(req: SpawnRequest): Promise<AgentSnapshot> {
     const cfg = this.settings();
     const id = randomUUID().slice(0, 8);
-    const name = req.name.trim() || `agente-${this.order.length + 1}`;
+    let name = req.name.trim() || `agente-${this.order.length + 1}`;
+    // Nomes únicos entre os cards abertos: dependências e mensagens usam o nome.
+    if ([...this.agents.values()].some((a) => a.snap.name === name)) {
+      let n = 2;
+      while ([...this.agents.values()].some((a) => a.snap.name === `${name}-${n}`)) n++;
+      name = `${name}-${n}`;
+    }
+    const after = (req.after ?? []).map((a) => a.trim()).filter(Boolean);
     const rt: AgentRuntime = {
       snap: {
         id,
@@ -195,19 +312,29 @@ export class Orchestrator {
         turns: 0,
         toolCalls: 0,
         tokensOut: 0,
-        activity: 'Na fila',
+        activity: after.length ? `Esperando ${after.join(', ')}` : 'Na fila',
         origin: req.origin,
+        after: after.length ? after : undefined,
+        role: req.role,
       },
       feed: [],
       seq: 0,
       pending: [],
       waiters: [],
       queuedPrompt: { text: req.task, resume: false },
+      token: randomUUID().replace(/-/g, ''),
+      boardCursor: 0,
     };
+    if (after.length) rt.snap.status = 'waiting';
     this.agents.set(id, rt);
     this.order.push(id);
 
-    if (req.isolate ?? cfg.isolate) {
+    if (req.existing) {
+      rt.snap.cwd = req.existing.cwd;
+      rt.snap.branch = req.existing.branch;
+      rt.snap.isolated = true;
+      rt.baseRef = req.existing.baseRef;
+    } else if (req.isolate ?? cfg.isolate) {
       try {
         await this.makeWorktree(rt, cfg.workspace);
       } catch (e) {
@@ -239,11 +366,14 @@ export class Orchestrator {
   stop(id: string): AgentSnapshot {
     const rt = this.get(id);
     if (!rt) throw new Error(`Agente "${id}" não existe.`);
-    if (rt.snap.status === 'queued') {
+    if (rt.snap.status === 'queued' || rt.snap.status === 'waiting') {
       this.finish(rt, 'stopped', 'Cancelado antes de começar.');
     } else if (rt.proc && rt.snap.status === 'running') {
       rt.snap.status = 'stopped';
       killTree(rt.proc);
+    } else if (rt.snap.status === 'running') {
+      // Ainda preparando (juntando branches): não há processo para matar.
+      void this.finish(rt, 'stopped', 'Parado por você.');
     }
     return rt.snap;
   }
@@ -294,12 +424,122 @@ export class Orchestrator {
   }
 
   private pump(): void {
+    // 1) Libera (ou pula) quem estava esperando dependências.
+    for (const id of this.order) {
+      const rt = this.agents.get(id)!;
+      if (rt.snap.status !== 'waiting') continue;
+      const deps = (rt.snap.after ?? []).map((n) => this.get(n));
+      const bad = deps.find((d) => !d || d.snap.status === 'failed' || d.snap.status === 'stopped');
+      if (bad !== undefined) {
+        const who = bad ? bad.snap.name : (rt.snap.after ?? []).find((n) => !this.get(n));
+        void this.finish(rt, 'stopped', `Pulado: a etapa anterior "${who}" não terminou com sucesso.`);
+        continue;
+      }
+      if (deps.every((d) => d!.snap.status === 'done')) {
+        rt.snap.status = 'queued';
+        rt.snap.activity = 'Na fila';
+        this.push(rt, 'system', `Etapas anteriores concluídas: ${(rt.snap.after ?? []).join(', ')}`);
+        this.flush(rt);
+      }
+    }
+    // 2) Começa os da fila, respeitando o limite de agentes ao mesmo tempo.
     const max = Math.max(1, this.settings().maxConcurrent);
     for (const id of this.order) {
       if (this.running() >= max) return;
       const rt = this.agents.get(id)!;
-      if (rt.snap.status === 'queued' && rt.queuedPrompt) this.start(rt);
+      if (rt.snap.status === 'queued' && rt.queuedPrompt) void this.start(rt);
     }
+  }
+
+  /**
+   * Antes de um agente com dependências começar: junta as branches das etapas anteriores
+   * no worktree dele (para ele partir do código delas) e monta o contexto com os resultados.
+   */
+  private async prepareAfter(rt: AgentRuntime): Promise<string> {
+    const deps = (rt.snap.after ?? []).map((n) => this.get(n)).filter((d): d is AgentRuntime => !!d);
+    const lines: string[] = [];
+    for (const d of deps) {
+      let merged = '';
+      if (rt.snap.isolated && d.snap.branch && d.snap.branch !== rt.snap.branch) {
+        try {
+          const id = await gitIdentity(rt.snap.cwd);
+          await gitRun([...id, 'merge', '--no-ff', '--no-edit', '-m', `zagent: traz o trabalho de ${d.snap.name}`, d.snap.branch], rt.snap.cwd);
+          merged = ' (o código dela já está nesta pasta)';
+          this.push(rt, 'system', `Juntou a branch de ${d.snap.name}: ${d.snap.branch}`);
+        } catch (e) {
+          await gitRun(['merge', '--abort'], rt.snap.cwd).catch(() => {});
+          merged = ` (NÃO foi possível juntar a branch ${d.snap.branch} por conflito; veja com git diff se precisar)`;
+          this.push(rt, 'stderr', `Conflito ao juntar ${d.snap.branch}; começando sem o código dessa etapa.`);
+        }
+      }
+      lines.push(`## Etapa anterior: ${d.snap.name}${merged}\nTarefa: ${d.snap.task}\nResultado:\n${d.snap.result ?? '(sem resumo)'}`);
+    }
+    return lines.length ? `Contexto: estas etapas terminaram antes de você.\n\n${lines.join('\n\n')}\n\n---\n\nSua tarefa:\n` : '';
+  }
+
+  /** Commita o que o agente deixou sem commit, para a branch dele carregar todo o trabalho. */
+  private async autoCommit(rt: AgentRuntime): Promise<void> {
+    if (!rt.snap.isolated) return;
+    try {
+      if (!(await gitRun(['status', '--porcelain'], rt.snap.cwd))) return;
+      await gitRun(['add', '-A'], rt.snap.cwd);
+      const id = await gitIdentity(rt.snap.cwd);
+      await gitRun([...id, 'commit', '-q', '-m', `zagent(${rt.snap.name}): trabalho não commitado do agente`], rt.snap.cwd);
+      this.push(rt, 'system', 'O zAgent commitou as mudanças que o agente deixou sem commit.');
+    } catch (e) {
+      this.push(rt, 'stderr', `Não consegui commitar as mudanças restantes: ${(e as Error).message.split('\n')[0]}`);
+    }
+  }
+
+  // ---------------------------------------------------------------- integração
+
+  /**
+   * Junta as branches dos agentes concluídos numa branch nova de integração (num worktree próprio).
+   * Conflitos não travam: a branch com conflito fica de fora e é listada. A main nunca é tocada.
+   * Com `verify`, abre um agente revisor nessa branch para rodar build/testes e corrigir a integração.
+   */
+  async integrate(opts: { ids?: string[]; verify?: boolean; instructions?: string } = {}): Promise<IntegrationResult> {
+    const cfg = this.settings();
+    const chosen = (opts.ids?.length ? opts.ids.map((i) => this.get(i)) : this.order.map((i) => this.agents.get(i)))
+      .filter((x): x is AgentRuntime => !!x && x.snap.role !== 'reviewer');
+    const ready = chosen.filter((a) => a.snap.status === 'done' && a.snap.isolated && a.snap.branch);
+    const skipped = chosen.filter((a) => !ready.includes(a)).map((a) => `${a.snap.name} (${a.snap.status})`);
+    if (!ready.length) throw new Error('Nenhum agente concluído com branch própria para juntar.');
+
+    const top = await gitRun(['rev-parse', '--show-toplevel'], cfg.workspace);
+    const base = await gitRun(['rev-parse', 'HEAD'], top);
+    const id = randomUUID().slice(0, 6);
+    const branch = `zagent/integracao-${id}`;
+    const path = join(top, '.zagent', 'worktrees', `integracao-${id}`);
+    mkdirSync(join(top, '.zagent', 'worktrees'), { recursive: true });
+    await gitRun(['worktree', 'add', '-b', branch, path, base], top);
+
+    const ident = await gitIdentity(path);
+    const merged: string[] = [];
+    const conflicts: IntegrationResult['conflicts'] = [];
+    for (const a of ready) {
+      try {
+        await gitRun([...ident, 'merge', '--no-ff', '--no-edit', '-m', `zagent: integra ${a.snap.name}`, a.snap.branch!], path);
+        merged.push(a.snap.name);
+      } catch {
+        const files = (await gitRun(['diff', '--name-only', '--diff-filter=U'], path).catch(() => '')).split('\n').filter(Boolean);
+        await gitRun(['merge', '--abort'], path).catch(() => {});
+        conflicts.push({ agent: a.snap.name, branch: a.snap.branch!, files });
+      }
+    }
+
+    const result: IntegrationResult = { branch, path, merged, conflicts, skipped };
+    if (opts.verify ?? true) {
+      const rev = await this.spawn({
+        name: 'revisor',
+        task: REVIEWER_PROMPT(merged, conflicts, opts.instructions),
+        origin: 'claude',
+        role: 'reviewer',
+        existing: { cwd: path, branch, baseRef: base },
+      });
+      result.reviewer = rev.name;
+    }
+    return result;
   }
 
   private async makeWorktree(rt: AgentRuntime, workspace: string): Promise<void> {
@@ -333,9 +573,16 @@ export class Orchestrator {
       cfg.workerPermission === 'safe'
         ? ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite']
         : ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'TodoWrite', 'Bash'];
+    if (this.mcpBase) allow.push('mcp__zagent__board_post', 'mcp__zagent__board_read');
     writeFileSync(settingsFile, JSON.stringify({ permissions: { allow, deny: DENY_RULES } }, null, 2));
 
     const args = ['-p', '--output-format', 'stream-json', '--verbose', '--settings', settingsFile];
+    const mcp = this.workerMcp(rt);
+    if (mcp) {
+      const mcpFile = join(this.settingsDir, `worker-${rt.snap.id}.mcp.json`);
+      writeFileSync(mcpFile, JSON.stringify({ mcpServers: { zagent: { type: 'http', url: mcp.url, headers: mcp.headers } } }), { mode: 0o600 });
+      args.push('--mcp-config', mcpFile);
+    }
     if (cfg.workerPermission === 'full') args.push('--dangerously-skip-permissions');
     else args.push('--permission-mode', 'acceptEdits');
     if (cfg.workerModel) args.push('--model', cfg.workerModel);
@@ -360,7 +607,20 @@ export class Orchestrator {
       external_directory: cfg.workerPermission === 'full' ? 'allow' : 'deny',
     };
     const configFile = join(this.settingsDir, `worker-${rt.snap.id}.opencode.json`);
-    writeFileSync(configFile, JSON.stringify({ permission, instructions: [promptFile] }, null, 2));
+    const mcp = this.workerMcp(rt);
+    writeFileSync(
+      configFile,
+      JSON.stringify(
+        {
+          permission,
+          instructions: [promptFile],
+          ...(mcp ? { mcp: { zagent: { type: 'remote', url: mcp.url, headers: mcp.headers, enabled: true } } } : {}),
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
 
     // --auto: no modo sem tela, pedidos de permissão viram "sim"; os "deny" continuam valendo.
     // --dir: o OpenCode decide a pasta do projeto pela variável PWD, não pela pasta do processo.
@@ -373,12 +633,26 @@ export class Orchestrator {
     return { args, env: { OPENCODE_CONFIG: configFile } };
   }
 
-  private start(rt: AgentRuntime): void {
+  /** Endpoint MCP só deste agente: dá acesso ao quadro de mensagens e a mais nada. */
+  private workerMcp(rt: AgentRuntime): { url: string; headers: Record<string, string> } | null {
+    if (!this.mcpBase) return null;
+    return { url: `${this.mcpBase}/agent/${rt.snap.id}`, headers: { Authorization: `Bearer ${rt.token}` } };
+  }
+
+  private async start(rt: AgentRuntime): Promise<void> {
     const prompt = rt.queuedPrompt!;
     rt.queuedPrompt = undefined;
     rt.snap.status = 'running';
     rt.snap.startedAt ??= Date.now();
     rt.snap.activity = 'Iniciando…';
+    let text = prompt.text;
+    if (!prompt.resume && rt.snap.after?.length && !rt.afterPrepared) {
+      rt.afterPrepared = true;
+      rt.snap.activity = 'Juntando o trabalho das etapas anteriores…';
+      this.flush(rt);
+      text = (await this.prepareAfter(rt)) + text;
+      if (rt.snap.status !== 'running') return; // parado enquanto preparava
+    }
 
     const backend: WorkerAgent = rt.snap.backend;
     const label = backend === 'opencode' ? 'opencode' : 'claude';
@@ -406,7 +680,7 @@ export class Orchestrator {
     }
     rt.proc = proc;
     // O prompt vai pelo stdin: sem problemas de aspas/escape em nenhum sistema.
-    proc.stdin?.end(prompt.text);
+    proc.stdin?.end(text);
 
     let buf = '';
     proc.stdout?.setEncoding('utf8');
@@ -557,6 +831,7 @@ export class Orchestrator {
       this.push(rt, status === 'stopped' ? 'system' : 'tool_error', text);
     }
     if (rt.proc && rt.snap.status !== 'running') killTree(rt.proc);
+    if (status === 'done') await this.autoCommit(rt);
     await this.computeDiff(rt);
     this.flush(rt);
     const waiters = rt.waiters.splice(0);

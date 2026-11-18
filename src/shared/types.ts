@@ -1,8 +1,9 @@
 // Tipos compartilhados entre o processo principal (Electron) e a interface.
 
-export type AgentStatus = 'queued' | 'running' | 'done' | 'failed' | 'stopped';
+/** waiting = esperando outros agentes terminarem (dependências). */
+export type AgentStatus = 'waiting' | 'queued' | 'running' | 'done' | 'failed' | 'stopped';
 
-export type FeedKind = 'text' | 'tool' | 'tool_error' | 'system' | 'result' | 'stderr';
+export type FeedKind = 'text' | 'tool' | 'tool_error' | 'system' | 'result' | 'stderr' | 'message';
 
 export interface FeedItem {
   /** Sequencial dentro do agente, para a UI renderizar só o que é novo. */
@@ -45,6 +46,28 @@ export interface AgentSnapshot {
   diffStat?: string;
   /** Quem criou: o Claude principal (via MCP) ou você (botão na UI). */
   origin: 'claude' | 'user';
+  /** Nomes dos agentes que precisam terminar antes deste começar. */
+  after?: string[];
+  /** Papel especial: revisor da integração. */
+  role?: 'reviewer';
+}
+
+export interface BoardMessage {
+  seq: number;
+  at: number;
+  from: string;
+  /** Nome do destinatário, ou "todos". */
+  to: string;
+  text: string;
+}
+
+export interface IntegrationResult {
+  branch: string;
+  path: string;
+  merged: string[];
+  conflicts: Array<{ agent: string; branch: string; files: string[] }>;
+  skipped: string[];
+  reviewer?: string;
 }
 
 export type WorkerPermission = 'safe' | 'standard' | 'full';

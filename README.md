@@ -34,6 +34,15 @@ Os dois usam o mesmo orquestrador, o mesmo servidor MCP e as mesmas regras de se
 4. Quando terminam, o Claude principal recebe o resumo de cada um (resultado, diff, commits) e
    **pergunta antes de fazer merge**.
 
+## Coordenação entre agentes
+
+Peça em linguagem normal, por exemplo: *"um agente cria a API; depois dele, outro faz o front; em paralelo, outro escreve a documentação; no fim junte e revise"*. O agente principal usa três recursos:
+
+- **Etapas com dependência:** um agente pode esperar outros (`after`). Enquanto espera, o card mostra **ESPERANDO**. Quando as etapas anteriores terminam, o zAgent junta as branches delas no worktree dele, e ele começa já com aquele código e com o resultado delas na tarefa. Se uma etapa falhar, quem depende dela é **pulado**. Dependência circular ou inexistente é recusada logo no pedido.
+- **Quadro de mensagens:** cada agente tem um endpoint MCP só dele, com o próprio token. Por ele, o agente lê e publica avisos (`board_read` / `board_post`), por exemplo "mudei a rota para /v2/users". As mensagens aparecem nos cards (`msg`). O agente principal também pode mandar aviso para um agente que está rodando. Os agentes leem o quadro quando decidem ler (são instruídos a ler no começo e no fim); ele não interrompe ninguém.
+- **Juntar + verificar** (`integrate_agents`, ou a tecla `i` no monitor): junta as branches concluídas numa branch nova `zagent/integracao-…`. Branch com conflito fica de fora e é listada, em vez de sobrescrever trabalho. Depois abre um agente **revisor** nessa branch, que roda build e testes e corrige só problemas de integração. A `main` nunca é tocada: o merge final é seu.
+- O zAgent commita sozinho o que um agente deixou sem commit, para que a branch dele carregue todo o trabalho.
+
 ## Rodar
 
 Requisitos: Node 20+, git e o [Claude Code](https://code.claude.com) instalado e logado (`claude` no PATH).
@@ -100,6 +109,7 @@ xvfb-run node test/real.mjs   # usa o Claude Code de verdade (gasta tokens)
 node test/cli-e2e.mjs         # CLI com claude falso (precisa de tmux)
 ./test/cli-real.sh            # CLI com o Claude de verdade (gasta tokens)
 node test/opencode-e2e.mjs    # agentes no OpenCode com provedor falso; confere o isolamento
+node test/coord-e2e.mjs       # etapas, quadro, integração com conflito e revisor (claude falso)
 ```
 
 No macOS e no Windows, rode sem o `xvfb-run`.

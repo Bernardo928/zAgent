@@ -23,6 +23,7 @@ const C = {
 const HUES = [75, 215, 78, 177, 204, 221, 80, 209, 141, 114];
 
 const STATUS: Record<AgentSnapshot['status'], [string, (s: string) => string]> = {
+  waiting: ['ESPERANDO', C.queued],
   queued: ['NA FILA', C.queued],
   running: ['RODANDO', C.running],
   done: ['CONCLUÍDO', C.done],
@@ -280,6 +281,20 @@ export class Monitor {
       case 'c':
         if (card?.snap.branch) this.flash(`merge: git merge --no-ff ${card.snap.branch}`);
         break;
+      case 'i':
+        // Junta tudo que terminou numa branch de integração e abre o revisor.
+        this.flash('Juntando as branches…');
+        this.orch
+          .integrate({ verify: true })
+          .then((r) =>
+            this.flash(
+              `Integração em ${r.branch}: ${r.merged.length} juntada(s)` +
+                (r.conflicts.length ? `, ${r.conflicts.length} com conflito (${r.conflicts.map((c) => c.agent).join(', ')})` : '') +
+                '. Revisor aberto.',
+            ),
+          )
+          .catch((e) => this.flash((e as Error).message));
+        break;
     }
     this.render();
   };
@@ -350,7 +365,7 @@ export class Monitor {
     if (this.notice) return C.accent(this.notice);
     const keys = this.expanded
       ? '↑↓ rolar · esc voltar · s parar · m mensagem · c merge'
-      : '↑↓ escolher · enter abrir · s parar · m mensagem · n novo · x fechar · c merge · q sair';
+      : '↑↓ escolher · enter abrir · s parar · m mensagem · n novo · i juntar+revisar · x fechar · c merge · q sair';
     return C.muted(fit(keys, W));
   }
 
@@ -386,6 +401,8 @@ export class Monitor {
       a.toolCalls ? `${a.toolCalls} ações` : '',
       a.tokensOut ? `${fmtTok(a.tokensOut)} tok` : '',
       a.costUsd ? fmtUsd(a.costUsd) : '',
+      a.role === 'reviewer' ? C.accent('revisor') : '',
+      a.status === 'waiting' && a.after?.length ? C.warn(`depois de ${a.after.join(', ')}`) : '',
       a.branch ? `⎇ ${a.branch}` : C.warn('sem isolamento'),
     ].filter(Boolean);
     return `${bar} ${color('●')} ${name} ${color(label)}  ${C.muted(meta.join(' · '))}`;
@@ -409,6 +426,10 @@ export class Monitor {
       case 'result':
         tag = C.done('  fim ');
         body = C.done(text);
+        break;
+      case 'message':
+        tag = C.accent('   msg');
+        body = C.accent(text);
         break;
       case 'stderr':
         tag = C.warn(' aviso');
