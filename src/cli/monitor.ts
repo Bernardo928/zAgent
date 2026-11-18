@@ -381,6 +381,7 @@ export class Monitor {
     const bar = c256(card.hue)(selected ? '▌' : '│');
     const name = selected ? inverse(bold(` ${a.name} `)) : bold(a.name);
     const meta = [
+      a.backend === 'opencode' ? C.accent('OpenCode') : C.accent('Claude'),
       elapsed,
       a.toolCalls ? `${a.toolCalls} ações` : '',
       a.tokensOut ? `${fmtTok(a.tokensOut)} tok` : '',

@@ -115,6 +115,7 @@ api.pty.onData((d: string) => {
 });
 api.pty.onExit((code: number) => {
   setMainAlive(false);
+  // Normalmente o app fecha junto (/exit). Se não fechou, foi erro ao abrir: deixa reabrir com Enter.
   term.write(`\r\n\x1b[90m── Claude encerrou (código ${code}). Pressione Enter para abrir de novo. ──\x1b[0m\r\n`);
 });
 function restartMain() {
@@ -430,7 +431,8 @@ let settings: Settings;
 const setDlg = $<HTMLDialogElement>('settings-dialog');
 const setForm = $('settings-form') as HTMLFormElement;
 $('open-settings').addEventListener('click', () => {
-  (setForm.elements.namedItem('workerModel') as HTMLSelectElement).value = settings.workerModel;
+  (setForm.elements.namedItem('workerModel') as HTMLInputElement).value = settings.workerModel;
+  (setForm.elements.namedItem('workerAgent') as HTMLSelectElement).value = settings.workerAgent ?? 'claude';
   (setForm.elements.namedItem('maxConcurrent') as HTMLInputElement).value = String(settings.maxConcurrent);
   (setForm.elements.namedItem('isolate') as HTMLInputElement).checked = settings.isolate;
   setForm.querySelectorAll<HTMLInputElement>('[name=workerPermission]').forEach((r) => (r.checked = r.value === settings.workerPermission));
@@ -442,6 +444,7 @@ setDlg.addEventListener('close', async () => {
   settings = await api.settings.set({
     workerPermission: f.get('workerPermission') as Settings['workerPermission'],
     workerModel: String(f.get('workerModel') ?? ''),
+    workerAgent: f.get('workerAgent') === 'opencode' ? 'opencode' : 'claude',
     maxConcurrent: Math.min(12, Math.max(1, Number(f.get('maxConcurrent')) || 4)),
     isolate: f.get('isolate') === 'on',
   });

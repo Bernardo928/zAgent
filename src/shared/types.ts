@@ -24,6 +24,8 @@ export interface AgentSnapshot {
   /** Branch git do worktree, se isolado. */
   branch?: string;
   isolated: boolean;
+  /** CLI que roda este agente. */
+  backend: WorkerAgent;
   model?: string;
   sessionId?: string;
   createdAt: number;
@@ -47,6 +49,9 @@ export interface AgentSnapshot {
 
 export type WorkerPermission = 'safe' | 'standard' | 'full';
 
+/** Qual CLI roda os agentes paralelos. */
+export type WorkerAgent = 'claude' | 'opencode';
+
 export interface Settings {
   workspace: string;
   workerPermission: WorkerPermission;
@@ -55,6 +60,8 @@ export interface Settings {
   maxConcurrent: number;
   /** Cria um git worktree por agente (recomendado). */
   isolate: boolean;
+  /** CLI dos agentes paralelos (padrão: claude). */
+  workerAgent?: WorkerAgent;
 }
 
 export interface AgentEvent {

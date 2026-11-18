@@ -74,6 +74,7 @@ function startMainClaude(cols = 100, rows = 30): void {
         ...(process.env as Record<string, string>),
         // wait_agents pode levar vários minutos.
         MCP_TOOL_TIMEOUT: process.env.MCP_TOOL_TIMEOUT || '1800000',
+        PWD: settings.workspace,
         ZAGENT_MCP_URL: mcp.url,
         ZAGENT_MCP_TOKEN: mcp.token,
         COLORTERM: 'truecolor',
@@ -90,6 +91,8 @@ function startMainClaude(cols = 100, rows = 30): void {
     if (term === t) {
       term = null;
       send('pty:exit', exitCode);
+      // /exit no Claude principal fecha o zAgent (before-quit para os agentes).
+      if (process.env.ZAGENT_MAIN_CMD === undefined) app.quit();
     }
   });
 }

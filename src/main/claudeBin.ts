@@ -2,29 +2,42 @@
 import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
-let cached: string | null = null;
+const cache = new Map<string, string>();
 
 /** Caminho do executável do Claude Code. ZAGENT_CLAUDE_BIN sobrescreve (útil em testes). */
 export function claudeBin(): string {
-  if (process.env.ZAGENT_CLAUDE_BIN) return process.env.ZAGENT_CLAUDE_BIN;
-  if (cached) return cached;
+  return resolveBin('claude', process.env.ZAGENT_CLAUDE_BIN);
+}
+
+/** Caminho do executável do OpenCode. ZAGENT_OPENCODE_BIN sobrescreve (útil em testes). */
+export function opencodeBin(): string {
+  return resolveBin('opencode', process.env.ZAGENT_OPENCODE_BIN);
+}
+
+/** Acha um executável no PATH do usuário; devolve o próprio nome se não achar. */
+export function resolveBin(name: string, override?: string): string {
+  if (override) return override;
+  const hit = cache.get(name);
+  if (hit) return hit;
+  let found = name;
   try {
     if (process.platform === 'win32') {
-      const found = execFileSync('where', ['claude'], { encoding: 'utf8' })
+      const list = execFileSync('where', [name], { encoding: 'utf8' })
         .split(/\r?\n/)
         .map((s) => s.trim())
         .filter(Boolean);
       // Prefere o .exe nativo; o .cmd (instalação via npm) exige passar pelo cmd.exe.
-      cached = found.find((f) => f.toLowerCase().endsWith('.exe')) ?? found[0] ?? 'claude';
+      found = list.find((f) => f.toLowerCase().endsWith('.exe')) ?? list[0] ?? name;
     } else {
-      const shell = process.env.SHELL || '/bin/bash';
+      const shell = process.env.SHELL || '/bin/sh';
       // Shell de login para enxergar o PATH do usuário (apps GUI no macOS não herdam o PATH do terminal).
-      cached = execFileSync(shell, ['-lc', 'command -v claude'], { encoding: 'utf8' }).trim() || 'claude';
+      found = execFileSync(shell, ['-lc', `command -v ${name}`], { encoding: 'utf8' }).trim().split('\n').pop() || name;
     }
   } catch {
-    cached = 'claude';
+    found = name;
   }
-  return cached;
+  if (found !== name) cache.set(name, found);
+  return found;
 }
 
 export function claudeAvailable(): boolean {
@@ -40,7 +53,11 @@ function quoteWin(arg: string): string {
 
 /** Inicia o claude como processo filho (usado pelos agentes paralelos). */
 export function spawnClaude(args: string[], opts: SpawnOptions): ChildProcess {
-  const bin = claudeBin();
+  return spawnBin(claudeBin(), args, opts);
+}
+
+/** Inicia um executável qualquer, tratando o .cmd do Windows. */
+export function spawnBin(bin: string, args: string[], opts: SpawnOptions): ChildProcess {
   if (needsCmd(bin)) {
     const line = [bin, ...args].map(quoteWin).join(' ');
     return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], {

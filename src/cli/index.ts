@@ -7,7 +7,7 @@ import { claudeBin } from '../main/claudeBin';
 import { startMcpServer } from '../main/mcpServer';
 import { Orchestrator } from '../main/orchestrator';
 import { MAIN_ALLOWED_TOOLS, MAIN_PROMPT, mcpConfigJson } from '../shared/mainClaude';
-import type { Settings, WorkerPermission } from '../shared/types';
+import type { Settings, WorkerAgent, WorkerPermission } from '../shared/types';
 import { runIntro, type MainAgent } from './intro';
 import { Monitor } from './monitor';
 
@@ -32,7 +32,9 @@ Opções:
   --agent <nome>        claude | opencode: pula a tela de escolha
   --no-intro            pula a animação de abertura
 
-Os agentes paralelos sempre rodam com Claude Code, mesmo com o OpenCode como agente principal.
+  --workers <nome>      claude | opencode: CLI dos agentes paralelos (padrão: a mesma do agente principal)
+
+Digitar /exit no agente principal fecha o zAgent inteiro (e para os agentes que estiverem rodando).
 
 No monitor: ↑↓ escolhe · enter abre · s para · m manda mensagem · n novo agente · x fecha · q sai
 Configuração padrão em ${join(HOME, 'settings.json')}.`;
@@ -43,6 +45,7 @@ interface Parsed {
   agent?: MainAgent;
   savedAgent?: MainAgent;
   noIntro?: boolean;
+  workers?: WorkerAgent;
   readyFile?: string;
   hint?: boolean;
   extra: string[];
@@ -116,6 +119,12 @@ function parse(argv: string[]): Parsed {
       case '--no-intro':
         out.noIntro = true;
         break;
+      case '--workers': {
+        const v = val();
+        if (v !== 'claude' && v !== 'opencode') die('--workers deve ser claude ou opencode.');
+        out.workers = v;
+        break;
+      }
       case '--ready-file':
         out.readyFile = val();
         break;
@@ -127,6 +136,8 @@ function parse(argv: string[]): Parsed {
     }
   }
   if (!existsSync(settings.workspace)) die(`Pasta não existe: ${settings.workspace}`);
+  // Agentes paralelos: --workers, senão a mesma CLI do agente principal (a última escolhida).
+  settings.workerAgent = out.workers ?? out.agent ?? savedAgent ?? 'claude';
   return out;
 }
 
@@ -141,6 +152,7 @@ function settingsFlags(s: Settings): string[] {
   const f = ['--cwd', s.workspace, '--permission', s.workerPermission, '--max', String(s.maxConcurrent)];
   if (s.workerModel) f.push('--model', s.workerModel);
   if (!s.isolate) f.push('--no-isolate');
+  f.push('--workers', s.workerAgent ?? 'claude');
   return f;
 }
 
@@ -196,7 +208,11 @@ function opencodeConfig(s: SessionInfo): string {
 /** Comando, argumentos e variáveis para abrir o agente principal escolhido. */
 function mainCommand(agent: MainAgent, s: SessionInfo, extra: string[]) {
   if (agent === 'opencode') {
-    return { bin: which('opencode') ?? 'opencode', args: extra, env: { OPENCODE_CONFIG: opencodeConfig(s) } };
+    const bin = which('opencode') ?? 'opencode';
+    // Na 2.x, sem --standalone o OpenCode usa um servidor compartilhado e ignora a config extra.
+    const v2 = /^\D*(\d+)/.exec(spawnSync(bin, ['--version'], { encoding: 'utf8' }).stdout ?? '')?.[1];
+    const args = Number(v2) >= 2 ? ['--standalone', ...extra] : extra;
+    return { bin, args, env: { OPENCODE_CONFIG: opencodeConfig(s) } };
   }
   return { bin: claudeBin(), args: claudeArgs(s, extra), env: {} as Record<string, string> };
 }
@@ -274,8 +290,14 @@ function runMain(p: Parsed, agent: MainAgent): void {
   }
   const cmd = mainCommand(agent, s, p.extra);
   const shell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd.bin);
-  const child = spawn(cmd.bin, cmd.args, { stdio: 'inherit', cwd: s.workspace, shell, env: { ...process.env, ...cmd.env } });
-  child.on('exit', (code) => process.exit(code ?? 0));
+  const child = spawn(cmd.bin, cmd.args, { stdio: 'inherit', cwd: s.workspace, shell, env: { ...process.env, ...cmd.env, PWD: s.workspace } });
+  // /exit no agente principal fecha o zAgent: avisa o monitor para parar os agentes e sair.
+  child.on('exit', (code) => {
+    try {
+      process.kill(s.pid, 'SIGTERM');
+    } catch { /* monitor já tinha saído */ }
+    process.exit(code ?? 0);
+  });
 }
 
 // ------------------------------------------------------------------ zagent (tmux)
@@ -303,6 +325,7 @@ async function runAll(p: Parsed): Promise<void> {
   const agent = await chooseAgent(p);
   if (!agent) return;
   p.agent = agent;
+  p.settings.workerAgent = p.workers ?? agent;
   const hasTmux = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
   if (!hasTmux) {
     process.stderr.write(
@@ -346,13 +369,11 @@ async function runAll(p: Parsed): Promise<void> {
     die('O monitor não iniciou a tempo.');
   }
 
-  // Quando o agente sair, o painel continua com um shell para você abrir de novo.
+  // /exit no agente principal fecha a sessão inteira; o monitor recebe SIGHUP e para os agentes.
   const cmd = mainCommand(agent, info, p.extra);
   const envPrefix = Object.entries(cmd.env).map(([k, v]) => `${k}=${q(v)} `).join('');
   const mainLine = envPrefix + [cmd.bin, ...cmd.args].map(q).join(' ');
-  const left =
-    `${mainLine}; printf '\\n\\033[90m${AGENT_LABEL[agent]} encerrou. Rode "zagent ${agent}" para abrir de novo, ou q no painel da direita para sair.\\033[0m\\n'; ` +
-    `exec "\${SHELL:-/bin/sh}"`;
+  const left = `${mainLine}; tmux kill-session -t ${q(session)}`;
   tmux('split-window', '-h', '-b', '-l', '58%', '-t', `${session}:0`, '-c', p.settings.workspace, left);
 
   // Visual: títulos nos painéis, mouse para clicar/redimensionar, barra de status discreta.

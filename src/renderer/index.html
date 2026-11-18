@@ -129,15 +129,24 @@
           </label>
         </fieldset>
 
+        <label
+          >Agentes paralelos rodam em
+          <select name="workerAgent">
+            <option value="claude">Claude Code</option>
+            <option value="opencode">OpenCode</option>
+          </select>
+        </label>
+
         <div class="row">
           <label
             >Modelo dos agentes
-            <select name="workerModel">
-              <option value="">Padrão do Claude Code</option>
-              <option value="opus">Opus</option>
-              <option value="sonnet">Sonnet</option>
-              <option value="haiku">Haiku</option>
-            </select>
+            <input name="workerModel" list="worker-models" placeholder="padrão" />
+            <datalist id="worker-models">
+              <option value="opus"></option>
+              <option value="sonnet"></option>
+              <option value="haiku"></option>
+            </datalist>
+            <small>No OpenCode, use provedor/modelo (ex.: anthropic/claude-sonnet-5-5).</small>
           </label>
           <label>Máximo em paralelo<input type="number" name="maxConcurrent" min="1" max="12" /></label>
         </div>

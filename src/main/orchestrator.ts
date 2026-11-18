@@ -8,8 +8,9 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { spawnClaude } from './claudeBin';
-import type { AgentEvent, AgentSnapshot, FeedItem, Settings } from '../shared/types';
+import { execFileSync } from 'node:child_process';
+import { opencodeBin, spawnBin, spawnClaude } from './claudeBin';
+import type { AgentEvent, AgentSnapshot, FeedItem, Settings, WorkerAgent } from '../shared/types';
 
 const run = promisify(execFile);
 const FEED_LIMIT = 600;
@@ -43,6 +44,31 @@ export const DENY_RULES = [
   'Bash(*db push --force-reset*)',
 ];
 
+/** As mesmas regras de DENY_RULES, no formato do OpenCode (padrões do comando bash). */
+export const OPENCODE_DENY: Record<string, 'deny'> = Object.fromEntries(
+  DENY_RULES.map((r) => [r.replace(/^Bash\((.*)\)$/, '$1'), 'deny' as const]),
+);
+
+/** Versão principal do OpenCode instalado (a 2.x precisa de --standalone para respeitar a config de cada agente). */
+let opencodeMajor: number | null = null;
+function opencodeVersion(): number {
+  if (opencodeMajor !== null) return opencodeMajor;
+  try {
+    const v = execFileSync(opencodeBin(), ['--version'], { encoding: 'utf8', timeout: 15000, shell: process.platform === 'win32' });
+    opencodeMajor = Number(/(\d+)\./.exec(v)?.[1] ?? 1);
+  } catch {
+    opencodeMajor = 1;
+  }
+  return opencodeMajor;
+}
+
+/** Nomes das ferramentas do OpenCode no mesmo formato das do Claude Code, para o resumo e as cores. */
+const OPENCODE_TOOL: Record<string, string> = {
+  bash: 'Bash', read: 'Read', edit: 'Edit', write: 'Write', patch: 'Edit', multiedit: 'MultiEdit',
+  glob: 'Glob', grep: 'Grep', list: 'Glob', webfetch: 'WebFetch', websearch: 'WebSearch',
+  task: 'Task', todowrite: 'TodoWrite', todoread: 'TodoWrite',
+};
+
 const WORKER_PROMPT = `Você é um agente paralelo dentro do zAgent. Outros agentes trabalham ao mesmo tempo em outras partes do projeto.
 Regras:
 - Trabalhe SOMENTE na pasta atual. Ela é um git worktree só seu, numa branch só sua.
@@ -62,6 +88,8 @@ interface AgentRuntime {
   flushTimer?: NodeJS.Timeout;
   waiters: Array<() => void>;
   queuedPrompt?: { text: string; resume: boolean };
+  /** Última resposta em texto (o OpenCode não manda um evento final com o resumo). */
+  lastText?: string;
 }
 
 export interface SpawnRequest {
@@ -92,6 +120,7 @@ function short(s: string, n: number): string {
 
 /** Uma linha legível para cada chamada de ferramenta. */
 export function summarizeTool(name: string, input: Record<string, unknown> = {}): string {
+  if (input.filePath && !input.file_path) input = { ...input, file_path: input.filePath };
   const s = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : '');
   const file = (p: string) => p.split(/[\\/]/).slice(-2).join('/');
   switch (name) {
@@ -160,6 +189,7 @@ export class Orchestrator {
         status: 'queued',
         cwd: cfg.workspace,
         isolated: false,
+        backend: cfg.workerAgent ?? 'claude',
         createdAt: Date.now(),
         costUsd: 0,
         turns: 0,
@@ -314,6 +344,35 @@ export class Orchestrator {
     return args;
   }
 
+  /** Argumentos do `opencode run`: config própria (permissões + instruções) via OPENCODE_CONFIG. */
+  private opencodeArgs(rt: AgentRuntime, resume: boolean): { args: string[]; env: Record<string, string> } {
+    const cfg = this.settings();
+    mkdirSync(this.settingsDir, { recursive: true });
+    const promptFile = join(this.settingsDir, 'worker-prompt.md');
+    writeFileSync(promptFile, WORKER_PROMPT);
+    // A última regra que casa vence: "*" primeiro, bloqueios depois.
+    const bash = cfg.workerPermission === 'safe' ? 'deny' : { '*': 'allow', ...OPENCODE_DENY };
+    const permission = {
+      '*': 'allow',
+      edit: 'allow',
+      bash,
+      // Fica dentro do worktree: nada de mexer em pastas de fora.
+      external_directory: cfg.workerPermission === 'full' ? 'allow' : 'deny',
+    };
+    const configFile = join(this.settingsDir, `worker-${rt.snap.id}.opencode.json`);
+    writeFileSync(configFile, JSON.stringify({ permission, instructions: [promptFile] }, null, 2));
+
+    // --auto: no modo sem tela, pedidos de permissão viram "sim"; os "deny" continuam valendo.
+    // --dir: o OpenCode decide a pasta do projeto pela variável PWD, não pela pasta do processo.
+    // Sem isso, um agente "isolado" roda na pasta de onde o zAgent foi aberto.
+    const args = ['run', '--format', 'json', '--auto', '--dir', rt.snap.cwd];
+    if (opencodeVersion() >= 2) args.push('--standalone', '--archived');
+    // O modelo do OpenCode é "provedor/modelo"; aliases do Claude (sonnet, haiku) não servem aqui.
+    if (cfg.workerModel.includes('/')) args.push('--model', cfg.workerModel);
+    if (resume && rt.snap.sessionId) args.push('--session', rt.snap.sessionId);
+    return { args, env: { OPENCODE_CONFIG: configFile } };
+  }
+
   private start(rt: AgentRuntime): void {
     const prompt = rt.queuedPrompt!;
     rt.queuedPrompt = undefined;
@@ -321,15 +380,28 @@ export class Orchestrator {
     rt.snap.startedAt ??= Date.now();
     rt.snap.activity = 'Iniciando…';
 
+    const backend: WorkerAgent = rt.snap.backend;
+    const label = backend === 'opencode' ? 'opencode' : 'claude';
+    rt.lastText = undefined;
     let proc: ChildProcess;
     try {
-      proc = spawnClaude(this.workerArgs(rt, prompt.resume), {
-        cwd: rt.snap.cwd,
-        env: { ...process.env, ZAGENT_AGENT: rt.snap.name },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      if (backend === 'opencode') {
+        const { args, env } = this.opencodeArgs(rt, prompt.resume);
+        rt.snap.model ??= this.settings().workerModel.includes('/') ? this.settings().workerModel : 'padrão do OpenCode';
+        proc = spawnBin(opencodeBin(), args, {
+          cwd: rt.snap.cwd,
+          env: { ...process.env, ...env, PWD: rt.snap.cwd, ZAGENT_AGENT: rt.snap.name },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } else {
+        proc = spawnClaude(this.workerArgs(rt, prompt.resume), {
+          cwd: rt.snap.cwd,
+          env: { ...process.env, PWD: rt.snap.cwd, ZAGENT_AGENT: rt.snap.name },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }
     } catch (e) {
-      this.finish(rt, 'failed', `Não consegui iniciar o claude: ${(e as Error).message}`);
+      this.finish(rt, 'failed', `Não consegui iniciar o ${label}: ${(e as Error).message}`);
       return;
     }
     rt.proc = proc;
@@ -344,7 +416,7 @@ export class Orchestrator {
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
-        if (line) this.onLine(rt, line);
+        if (line) (backend === 'opencode' ? this.onOpencodeLine(rt, line) : this.onLine(rt, line));
       }
     });
     let errTail = '';
@@ -352,16 +424,70 @@ export class Orchestrator {
     proc.stderr?.on('data', (chunk: string) => {
       errTail = (errTail + chunk).slice(-2000);
     });
-    proc.on('error', (e) => this.finish(rt, 'failed', `Erro ao executar o claude: ${e.message}`));
+    proc.on('error', (e) => this.finish(rt, 'failed', `Erro ao executar o ${label}: ${e.message}`));
     proc.on('close', (code) => {
-      if (buf.trim()) this.onLine(rt, buf.trim());
+      if (buf.trim()) (backend === 'opencode' ? this.onOpencodeLine(rt, buf.trim()) : this.onLine(rt, buf.trim()));
       rt.proc = undefined;
       if (rt.snap.status === 'stopped') return this.finish(rt, 'stopped', 'Parado por você.');
       if (rt.snap.status !== 'running') return; // já finalizado pelo evento "result"
+      // O OpenCode não manda evento final: sucesso = saiu com 0, e o resumo é a última resposta em texto.
+      if (code === 0 && rt.lastText !== undefined) return this.finish(rt, 'done', rt.lastText);
       const msg = errTail.trim() ? short(errTail.trim(), 600) : `O processo saiu com código ${code}.`;
       this.finish(rt, code === 0 ? 'done' : 'failed', msg);
     });
     this.flush(rt);
+  }
+
+  /** Eventos do `opencode run --format json` (step_start, text, tool_use, step_finish, error). */
+  private onOpencodeLine(rt: AgentRuntime, line: string): void {
+    let ev: any;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (ev.sessionID) rt.snap.sessionId = ev.sessionID;
+    const part = ev.part ?? {};
+    switch (ev.type) {
+      case 'text':
+        if (typeof part.text === 'string' && part.text.trim()) {
+          const text: string = part.text.trim();
+          rt.lastText = text;
+          this.push(rt, 'text', text);
+          rt.snap.activity = short(text, 120);
+        }
+        break;
+      case 'tool_use': {
+        const st = part.state ?? {};
+        const name = OPENCODE_TOOL[part.tool] ?? part.tool ?? 'tool';
+        const summary = st.title && name !== 'Read' && name !== 'Edit' && name !== 'Write' ? short(String(st.title), 140) : summarizeTool(name, st.input ?? {});
+        rt.snap.toolCalls++;
+        rt.snap.activity = `${name} · ${summary}`;
+        this.push(rt, 'tool', summary, name);
+        if (st.status === 'error') {
+          const err = String(st.error ?? 'erro');
+          const blocked = /rule which prevents|permission|denied|not allowed/i.test(err);
+          this.push(rt, 'tool_error', (blocked ? 'Bloqueado: ' : '') + short(blocked ? `regra do zAgent impediu: ${summary}` : err, 400));
+        } else if (typeof st.metadata?.exit === 'number' && st.metadata.exit !== 0) {
+          this.push(rt, 'tool_error', short(`saiu com código ${st.metadata.exit}: ${String(st.output ?? '').trim()}`, 400));
+        }
+        break;
+      }
+      case 'step_finish':
+        rt.snap.turns++;
+        rt.snap.costUsd += Number(part.cost) || 0;
+        rt.snap.tokensOut += Number(part.tokens?.output) || 0;
+        break;
+      case 'error': {
+        const e = ev.error ?? part.error ?? ev;
+        const msg = typeof e === 'string' ? e : e?.data?.message ?? e?.message ?? JSON.stringify(e);
+        this.push(rt, 'tool_error', short(String(msg), 400));
+        rt.lastText = undefined;
+        this.finish(rt, 'failed', String(msg));
+        break;
+      }
+    }
+    this.scheduleFlush(rt);
   }
 
   private onLine(rt: AgentRuntime, line: string): void {

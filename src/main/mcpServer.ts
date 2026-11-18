@@ -39,7 +39,7 @@ function buildServer(orch: Orchestrator): McpServer {
     {
       title: 'Abrir agentes paralelos',
       description:
-        'Abre um ou mais agentes Claude Code em paralelo. Cada um ganha um painel visível no zAgent, ' +
+        'Abre um ou mais agentes em paralelo (Claude Code ou OpenCode, conforme a configuração do zAgent). Cada um ganha um painel visível no zAgent, ' +
         'um git worktree próprio e uma branch própria. Retorna na hora com os ids; use wait_agents para esperar os resultados. ' +
         'Dê a cada agente uma tarefa independente e completa (ele não vê esta conversa), com critério de pronto claro.',
       inputSchema: {
